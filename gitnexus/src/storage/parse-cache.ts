@@ -800,7 +800,16 @@ import { copyV8CacheIfPresent, tryLoadV8Cache, writeV8CacheFile } from './v8-sid
 // v117 (#3390 private-only successor): simple-positional call entries now carry
 // their count privately, while ordinary Python references no longer receive
 // synthetic arity. Warm v116 ParsedFiles have neither equivalent fact.
-const SCHEMA_BUMP = 117;
+// v121 (kaybenleroll/GitNexus#5): R scope queries now anchor a `@scope.function`
+// on every named-function assignment and named function-valued argument (the
+// same nodes the `@declaration.function`/`@declaration.method` anchors use),
+// so each def is owned by its own Function scope instead of the module/Class
+// scope. Warm ParsedFiles and durable stores hold the pre-fix scope tree, where
+// every R call is credited to the first callable in its file; both stores must
+// re-extract. 118-120 belong to upstream Python changes (#3398, #3396, #3394)
+// that this branch does not carry; 121 is upstream's last-known value (120)
+// plus one — re-confirm against upstream/main at merge time.
+const SCHEMA_BUMP = 121;
 const GITNEXUS_PKG_VERSION = (() => {
   try {
     // package.json sits at gitnexus/package.json — two levels up from
