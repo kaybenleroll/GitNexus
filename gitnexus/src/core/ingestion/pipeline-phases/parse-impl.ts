@@ -103,7 +103,7 @@ import type {
 import { normalizeExtractedRoutePath } from '../route-extractors/route-path.js';
 import { resolveOperands } from '../route-extractors/python-const-resolver.js';
 import type { ModuleConstants } from '../route-extractors/constant-resolver.js';
-import { prepareRouteConstantsByProvider } from '../language-provider.js';
+import { prepareRouteConstantsByProvider, runPostParseHooks } from '../language-provider.js';
 import {
   resolveInheritedSpringRoutes,
   type SharedSpringType,
@@ -1553,6 +1553,15 @@ export async function runChunkedParseAndResolve(
   attachDeferredROwners(graph, model, 'Property', 'HAS_PROPERTY');
   const rPackageConfig = await loadRPackageConfig(repoPath);
   refineRExportStatus(graph, rPackageConfig);
+
+  // Language post-parse hooks: whole-graph work a language can only do once every chunk is merged
+  // and before scope resolution (e.g. deferred owner resolution). Only languages with parsed files pay.
+  const presentLanguages = new Set<SupportedLanguages>();
+  for (const file of parseableScanned) {
+    const language = languageForScannedFile(file);
+    if (language !== null) presentLanguages.add(language);
+  }
+  await runPostParseHooks(presentLanguages, getProvider, { graph, model, repoPath });
 
   // Worker-path enrichment: if exportedTypeMap is empty (e.g. the worker pool
   // built TypeEnv inside workers without access to SymbolTable), reconstruct
