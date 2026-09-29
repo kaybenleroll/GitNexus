@@ -560,8 +560,7 @@ export interface ParseWorkerInput {
 }
 
 type WorkerIncomingMessage =
-  | { type: 'sub-batch'; files: ParseWorkerInput[] }
-  | { type: 'flush'; chunkHash?: string };
+  { type: 'sub-batch'; files: ParseWorkerInput[] } | { type: 'flush'; chunkHash?: string };
 
 // ============================================================================
 // Worker-local parser + language map
@@ -3091,7 +3090,7 @@ const processFileGroup = (
         language === SupportedLanguages.R && definitionNode && !enclosingClassId
           ? nodeLabel === 'Method'
             ? (getRTopLevelMethodOwnerName(definitionNode) ??
-                getRTopLevelPropertyOwnerName(definitionNode))
+              getRTopLevelPropertyOwnerName(definitionNode))
             : nodeLabel === 'Property'
               ? getRTopLevelPropertyOwnerName(definitionNode)
               : null
