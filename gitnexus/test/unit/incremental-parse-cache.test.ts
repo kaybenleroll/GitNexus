@@ -297,12 +297,10 @@ describe('PARSE_CACHE_VERSION', () => {
   // Moved 114 -> 115 for #3390: statically known Python call arity.
   // Moved 115 -> 116 for #3390's Python subtype-dispatch shape side-channel.
   // Moved 116 -> 117 for #3390's private positional-count side-channel.
-  // 118-120 are taken by upstream Python changes (#3398, #3396, #3394); this
-  // fork's R caller-attribution fix (kaybenleroll/GitNexus#5) moves 117 -> 121.
-  // Fork's R `pkg::` qualifier capture (kaybenleroll/GitNexus#7) moves 121 -> 124;
-  // 122-123 are upstream's, and 121 is taken (upstream's own 121 collides with the
-  // fork's #5 value; reconcile at #21).
-  it('pins SCHEMA_BUMP to 124 so concurrent bumps cannot silently collide (#2766, #3015, #3088, #2885, #3128, #2865, #3130, #1432, #3161, #3179, #3219, #3190, #3253, #3273, #3339, #3354, #3371, #2965, #3390, kaybenleroll/GitNexus#5, kaybenleroll/GitNexus#7)', () => {
+  // 118-120 are taken by upstream Python changes (#3398, #3396, #3394); R's
+  // `@scope.function` caller-attribution anchors move 117 -> 121, and R's `pkg::`
+  // qualifier capture moves 121 -> 124 (122-123 are taken).
+  it('pins SCHEMA_BUMP to 124 so concurrent bumps cannot silently collide (#2766, #3015, #3088, #2885, #3128, #2865, #3130, #1432, #3161, #3179, #3219, #3190, #3253, #3273, #3339, #3354, #3371, #2965, #3390)', () => {
     expect(Number(PARSE_CACHE_VERSION.split('+', 1)[0])).toBe(124);
     expect(PARSE_CACHE_BUCKET_COUNT).toBe(128);
     // The PREVIOUS version must fail the reuse gate, not merely differ from the
