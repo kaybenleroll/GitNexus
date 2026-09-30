@@ -299,8 +299,11 @@ describe('PARSE_CACHE_VERSION', () => {
   // Moved 116 -> 117 for #3390's private positional-count side-channel.
   // 118-120 are taken by upstream Python changes (#3398, #3396, #3394); this
   // fork's R caller-attribution fix (kaybenleroll/GitNexus#5) moves 117 -> 121.
-  it('pins SCHEMA_BUMP to 121 so concurrent bumps cannot silently collide (#2766, #3015, #3088, #2885, #3128, #2865, #3130, #1432, #3161, #3179, #3219, #3190, #3253, #3273, #3339, #3354, #3371, #2965, #3390, kaybenleroll/GitNexus#5)', () => {
-    expect(Number(PARSE_CACHE_VERSION.split('+', 1)[0])).toBe(121);
+  // Fork's R `pkg::` qualifier capture (kaybenleroll/GitNexus#7) moves 121 -> 124;
+  // 122-123 are upstream's, and 121 is taken (upstream's own 121 collides with the
+  // fork's #5 value; reconcile at #21).
+  it('pins SCHEMA_BUMP to 124 so concurrent bumps cannot silently collide (#2766, #3015, #3088, #2885, #3128, #2865, #3130, #1432, #3161, #3179, #3219, #3190, #3253, #3273, #3339, #3354, #3371, #2965, #3390, kaybenleroll/GitNexus#5, kaybenleroll/GitNexus#7)', () => {
+    expect(Number(PARSE_CACHE_VERSION.split('+', 1)[0])).toBe(124);
     expect(PARSE_CACHE_BUCKET_COUNT).toBe(128);
     // The PREVIOUS version must fail the reuse gate, not merely differ from the
     // current one — a hardcoded number outside the conflict hunk rebases cleanly
@@ -309,7 +312,8 @@ describe('PARSE_CACHE_VERSION', () => {
     for (const taken of [
       59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81,
       82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
-      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122,
+      123,
     ]) {
       expect(Number(PARSE_CACHE_VERSION.split('+', 1)[0])).not.toBe(taken);
     }
