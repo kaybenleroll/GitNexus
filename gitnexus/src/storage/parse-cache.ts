@@ -809,7 +809,13 @@ import { copyV8CacheIfPresent, tryLoadV8Cache, writeV8CacheFile } from './v8-sid
 // re-extract. 118-120 belong to upstream Python changes (#3398, #3396, #3394)
 // that this branch does not carry; 121 is upstream's last-known value (120)
 // plus one — re-confirm against upstream/main at merge time.
-const SCHEMA_BUMP = 121;
+// v124 (kaybenleroll/GitNexus#7): R scope queries now capture the `pkg::`/`pkg:::`
+// qualifier of namespaced calls as `@reference.qualified-name`, so it reaches
+// `site.rawQualifiedName`. Warm ParsedFiles hold the pre-capture site shape without the
+// qualifier, so both stores must re-extract. 122-123 are upstream's numbers (not carried by
+// this branch), and this fork's own 121 collided with upstream's 121; the value is a
+// placeholder to be reconciled against upstream/main at #21.
+const SCHEMA_BUMP = 124;
 const GITNEXUS_PKG_VERSION = (() => {
   try {
     // package.json sits at gitnexus/package.json — two levels up from
