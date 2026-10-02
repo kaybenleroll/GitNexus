@@ -38,6 +38,8 @@ import type { ImportResolverFn } from './import-resolvers/types.js';
 import type { SyntaxNode } from './utils/ast-helpers.js';
 import type { CfgVisitor } from './cfg/types.js';
 import type { GraphNode, NodeLabel, ParameterTypeClass, RelationshipType } from 'gitnexus-shared';
+import type { KnowledgeGraph } from '../graph/types.js';
+import type { MutableSemanticModel } from './model/semantic-model.js';
 import type { ExtractedRoute } from './route-extractors/laravel.js';
 import type { SharedSpringType } from './route-extractors/spring-shared.js';
 import type {
@@ -47,6 +49,19 @@ import type {
 } from './route-extractors/constant-resolver.js';
 import type Parser from 'tree-sitter';
 import type { ExtractedDecoratorRoute } from './workers/parse-worker.js';
+import type { SemanticModel } from './model/semantic-model.js';
+
+/** What a provider's {@link LanguageProviderConfig.resolveRouteHandler} can see. */
+export interface RouteHandlerResolutionHookContext {
+  /** The model after every file has been parsed; scope resolution has not run. */
+  readonly model: SemanticModel;
+  /**
+   * Every workspace file the import bound to `localName` in `fromFile` resolves
+   * to. `[]` when the name is not a unique import binding or the import does
+   * not resolve inside the workspace (stdlib, third-party).
+   */
+  readonly importTargetsFor: (fromFile: string, localName: string) => readonly string[];
+}
 import type { SpringNonHttpHandlerFact } from './frameworks/spring/non-http-handlers.js';
 import type { SpringMessageProducerFact } from './frameworks/spring/message-producers.js';
 
@@ -220,6 +235,16 @@ export function shouldHarvestModuleConstants(
   return !provider.moduleConstantHeuristic || provider.moduleConstantHeuristic(content);
 }
 
+/**
+ * Everything a {@link LanguageProviderConfig.postParse} hook may read or mutate: the merged graph, the
+ * populated semantic model, and the repository root. Hooks mutate `graph`/`model` in place.
+ */
+export interface PostParseContext {
+  readonly graph: KnowledgeGraph;
+  readonly model: MutableSemanticModel;
+  readonly repoPath: string;
+}
+
 interface LanguageProviderConfig {
   // ── Identity ──────────────────────────────────────────────────────
   readonly id: SupportedLanguages;
@@ -359,6 +384,16 @@ interface LanguageProviderConfig {
     root: SyntaxNode,
     filePath: string,
   ) => { readonly name: string; readonly label: NodeLabel } | null;
+
+  /**
+   * For languages whose member owner is not a syntactic ancestor container
+   * (R: `R6Class(...)` / `setRefClass(...)` calls): return the node the
+   * method/field extractors read members from, or `null`.
+   *
+   * Consulted by the enclosing-owner slot after the container walk and
+   * `resolveFileTypeOwner` (same slot as the Zig file-owner).
+   * Default: undefined. */
+  readonly resolveMemberOwnerNode?: (definitionNode: SyntaxNode) => SyntaxNode | null;
 
   /**
    * The type a CONTAINER node declares, when the language names it from its
@@ -544,7 +579,8 @@ interface LanguageProviderConfig {
    * Decorators are the common case and the reason for the name, but not the only
    * shape: JS/TS uses this hook for hand-rolled dispatch guards
    * (`route-extractors/dispatch-guard.ts`), where a raw `node:http` server
-   * declares a route by comparing the request path to a literal. Anything that
+   * declares a route by comparing the request path to a literal, and Go uses it
+   * for gin/echo verb calls (`route-extractors/go-gin-echo.ts`). Anything that
    * yields a `(path, verb, handler)` triple from one file's AST belongs here —
    * set `ExtractedDecoratorRoute.source` when the provenance is not a decorator,
    * so the `HANDLES_ROUTE` edge does not claim one.
@@ -578,6 +614,24 @@ interface LanguageProviderConfig {
    * Default: undefined (no handler name from generic decorator captures).
    */
   readonly decoratorRouteHandlerName?: (decoratorNode: SyntaxNode) => string | undefined;
+
+  /**
+   * Resolve a route's `handlerName` to a symbol node id, for routes this
+   * language extracted. When defined, the routes phase asks this hook instead of
+   * looking the name up in the route's own file — for languages whose handlers
+   * routinely live in other files of the same package or module, and whose
+   * visibility rules only the language knows.
+   *
+   * Return a node id only when exactly one definition matches; `undefined`
+   * leaves the route without `handlerSymbolId` (fail-open, never a wrong
+   * handler).
+   *
+   * Default: undefined (same-file lookup by name).
+   */
+  readonly resolveRouteHandler?: (
+    route: ExtractedDecoratorRoute,
+    context: RouteHandlerResolutionHookContext,
+  ) => string | undefined;
 
   /**
    * Collect a project-wide, language-agnostic view of route-defining
@@ -687,6 +741,20 @@ interface LanguageProviderConfig {
    * Default: undefined (the harvested constants are already fold-ready).
    */
   readonly prepareRouteConstants?: (repo: RepoConstants) => void;
+
+  /**
+   * Whole-graph work that can only run once every chunk is merged and before scope resolution
+   * (deferred owner resolution, package-manifest-driven export refinement). "Post-parse" means after
+   * all chunks are merged but still inside the parse phase — not the later `crossFile` phase.
+   *
+   * Called once per analyze, only if this language has parsed files, awaited, on the main thread.
+   * Mutates `ctx.graph` / `ctx.model` in place. A throw aborts the parse phase (it is not isolated,
+   * because the hook mutates shared state and a swallowed mid-mutation throw could leave the graph
+   * half-updated).
+   *
+   * Default: undefined (nothing to do after the merge).
+   */
+  readonly postParse?: (ctx: PostParseContext) => void | Promise<void>;
 
   /**
    * Spring async messaging facts captured for one file — the listener
@@ -1184,6 +1252,22 @@ export function prepareRouteConstantsByProvider(
   }
   for (const [provider, slice] of slices) {
     provider.prepareRouteConstants?.(slice);
+  }
+}
+
+/**
+ * Run each present language's {@link LanguageProviderConfig.postParse} hook, sequentially and in
+ * language-id order (independent of scan order), awaiting each before the next: the hooks share one
+ * mutable graph/model. The provider lookup is a callback so this file needs no registry import.
+ * A rejection propagates and later hooks do not run.
+ */
+export async function runPostParseHooks(
+  presentLanguages: ReadonlySet<SupportedLanguages>,
+  providerFor: (language: SupportedLanguages) => Pick<LanguageProvider, 'postParse'> | undefined,
+  ctx: PostParseContext,
+): Promise<void> {
+  for (const language of [...presentLanguages].sort()) {
+    await providerFor(language)?.postParse?.(ctx);
   }
 }
 

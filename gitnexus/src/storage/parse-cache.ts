@@ -800,7 +800,50 @@ import { copyV8CacheIfPresent, tryLoadV8Cache, writeV8CacheFile } from './v8-sid
 // v117 (#3390 private-only successor): simple-positional call entries now carry
 // their count privately, while ordinary Python references no longer receive
 // synthetic arity. Warm v116 ParsedFiles have neither equivalent fact.
-const SCHEMA_BUMP = 117;
+// v118 (#3398): decorated Python methods with unproven decorator identity no
+// longer publish subtype positional capacity. Warm v117 side-channel snapshots
+// would retain that capacity and could emit a false concrete call target.
+// v119 (#3396): Python subtype method capacities now omit receiverless ordinary
+// methods. Warm v118 ParsedFiles would replay a false compatible target.
+// v120 (#3394): decorated Python method receiver bindings now distinguish
+// unproven decorators from instance receivers. Warm v119 ParsedFiles would
+// replay a fabricated `self` binding or lack the uncertainty marker entirely.
+// v121 (#3399 follow-up): Python decorator identity now ignores trailing
+// comments, honors rebinding of builtin descriptor names visible where the
+// decorator is evaluated, and withholds subtype capacity from descriptor
+// stacks. Warm v120 captures carry the old verdicts.
+// v122 (#3414): Python decorator identity models restoring helper calls and
+// treats match-pattern captures and nested nonlocal rebinds as shadowing.
+// Warm v121 captures carry the old verdicts.
+// v123 (#3408): FastAPI include records now carry `host`, router imports carry
+// `modulePath`, and unprefixed child includes are emitted. Warm v122 records
+// lack them, so nested router-prefix propagation would stay inert.
+// v124 (#3402): Go files now emit gin/echo `decoratorRoutes` carrying a
+// `handlerReceiver` hint. Warm v123 Go worker results carry no routes.
+// v125 (#3402): Go route hints now honor lexical declarations and captured writes;
+// namespace imports retain whether their local name comes from the package clause.
+// v126: R scope queries now anchor a `@scope.function`
+// on every named-function assignment and named function-valued argument (the
+// same nodes the `@declaration.function`/`@declaration.method` anchors use),
+// so each def is owned by its own Function scope instead of the module/Class
+// scope. Warm ParsedFiles and durable stores hold the pre-fix scope tree, where
+// every R call is credited to the first callable in its file; both stores must
+// re-extract.
+// v127: R scope queries now capture the `pkg::`/`pkg:::`
+// qualifier of namespaced calls as `@reference.qualified-name`, so it reaches
+// `site.rawQualifiedName`. Warm ParsedFiles hold the pre-capture site shape without the
+// qualifier, so both stores must re-extract.
+// v128: the R provider keeps only the argument that names an S4 definition
+// (shouldSkipDefinitionCapture), so `setClass("A", contains = "VIRTUAL")` no
+// longer defines a Class `VIRTUAL`, `setGeneric(..., valueClass = "numeric")` a
+// Function `numeric`, nor `setMethod("show", "Foo", ...)` a Method `Foo`. The R
+// scope emitter likewise keeps only the argument that names a `setClass` class
+// or a `library`/`require`/`source` import, so `library(lib.loc = libO, pkgP)`
+// no longer imports `libO` and a comment before the first argument no longer
+// hides the class or import. Definitions and scope captures are parse-time
+// facts replayed verbatim from the warm cache, so stale ones would persist on
+// unchanged files. (One bump covers both: v128 has not shipped.)
+const SCHEMA_BUMP = 128;
 const GITNEXUS_PKG_VERSION = (() => {
   try {
     // package.json sits at gitnexus/package.json — two levels up from
