@@ -41,6 +41,7 @@ jobs:
             test/integration/r-post-parse-gating.test.ts \
             test/integration/r-worker-owner-absence.test.ts \
             test/integration/resolvers/callable-value-flow.test.ts \
+            test/integration/resolvers/r-dotted-cross-file.test.ts \
             test/integration/resolvers/r-dotted-s3-collision.test.ts \
             test/integration/resolvers/r-qualified-calls.test.ts \
             test/integration/resolvers/r-roxygen-param.test.ts \
@@ -63,6 +64,7 @@ jobs:
             test/unit/r-export-status-layout.test.ts \
             test/unit/r-export-status-root.test.ts \
             test/unit/r-field-extractor-class-owner.test.ts \
+            test/unit/r-method-extractor-owner.test.ts \
             test/unit/r-import-root-package.test.ts \
             test/unit/r-namespace-exports.test.ts \
             test/unit/r-namespace-parser.test.ts \
@@ -79,7 +81,7 @@ jobs:
             test/unit/scope-resolution/r/r-qualified-call-populate.test.ts \
             test/unit/scope-resolution/r/r-qualified-call.test.ts \
             test/unit/scope-resolution/r/scope-function-anchors.test.ts \
-            test/unit/type-env-r.test.ts
+            test/unit/type-env-r.test.ts \
             2>&1 | tee ../.scratch/vitest-output.txt
       - name: Summary
         if: always()
