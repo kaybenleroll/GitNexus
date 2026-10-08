@@ -1,0 +1,96 @@
+name: R cross-platform check
+
+on:
+  push:
+    branches: [ci/r-cross-platform-check]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  r-tests:
+    name: ${{ matrix.os }} R tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gitnexus
+        with:
+          build: 'true'
+      - name: Ensure FTS + VECTOR extensions installed
+        run: npx tsx scripts/ensure-fts.ts
+        shell: bash
+        working-directory: gitnexus
+      - name: Run R tests
+        shell: bash
+        env:
+          GITNEXUS_E2E_CLI: dist
+        working-directory: gitnexus
+        run: |
+          set -o pipefail
+          mkdir -p ../.scratch
+          npx vitest run --reporter=default \
+            test/integration/parsing.test.ts \
+            test/integration/r-post-parse-gating.test.ts \
+            test/integration/r-worker-owner-absence.test.ts \
+            test/integration/resolvers/callable-value-flow.test.ts \
+            test/integration/resolvers/r-dotted-s3-collision.test.ts \
+            test/integration/resolvers/r-qualified-calls.test.ts \
+            test/integration/resolvers/r-roxygen-param.test.ts \
+            test/integration/resolvers/r-s4-anchors.test.ts \
+            test/integration/resolvers/r-s4-formals.test.ts \
+            test/integration/resolvers/r-scope-args.test.ts \
+            test/integration/resolvers/r.test.ts \
+            test/integration/tree-sitter-languages.test.ts \
+            test/unit/call-arguments-r.test.ts \
+            test/unit/incremental-parse-cache.test.ts \
+            test/unit/ingestion-utils.test.ts \
+            test/unit/language-provider-post-parse.test.ts \
+            test/unit/parser-loader-abi.test.ts \
+            test/unit/prebuild-coverage.test.ts \
+            test/unit/r-definition-anchors.test.ts \
+            test/unit/r-export-pattern-safety.test.ts \
+            test/unit/r-export-pattern-scale.test.ts \
+            test/unit/r-export-pattern-shared-budget.test.ts \
+            test/unit/r-export-pattern.test.ts \
+            test/unit/r-export-status-layout.test.ts \
+            test/unit/r-export-status-root.test.ts \
+            test/unit/r-field-extractor-class-owner.test.ts \
+            test/unit/r-import-root-package.test.ts \
+            test/unit/r-namespace-exports.test.ts \
+            test/unit/r-namespace-parser.test.ts \
+            test/unit/r-owner-hooks.test.ts \
+            test/unit/r-package-discovery-order.test.ts \
+            test/unit/r-package-discovery-vendored.test.ts \
+            test/unit/r-post-parse-owners.test.ts \
+            test/unit/r-qualified-capture.test.ts \
+            test/unit/r-scope-naming-argument.test.ts \
+            test/unit/scope-resolution/external-import-conformance.test.ts \
+            test/unit/scope-resolution/import-target-index-reuse.contract.test.ts \
+            test/unit/scope-resolution/r/r-dotted-s3-hooks.test.ts \
+            test/unit/scope-resolution/r/r-namespace-imports.test.ts \
+            test/unit/scope-resolution/r/r-qualified-call-populate.test.ts \
+            test/unit/scope-resolution/r/r-qualified-call.test.ts \
+            test/unit/scope-resolution/r/scope-function-anchors.test.ts \
+            test/unit/type-env-r.test.ts
+            2>&1 | tee ../.scratch/vitest-output.txt
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          grep -E "Test Files|Tests |FAIL|✗|×" .scratch/vitest-output.txt | head -100 || true
+      - name: Upload vitest output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vitest-${{ matrix.os }}
+          path: .scratch/vitest-output.txt
+          include-hidden-files: true
+          if-no-files-found: warn
