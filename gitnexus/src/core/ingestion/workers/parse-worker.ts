@@ -15,6 +15,7 @@ import CPP from 'tree-sitter-cpp';
 import CSharp from 'tree-sitter-c-sharp/bindings/node/index.js';
 import Go from 'tree-sitter-go';
 import Rust from 'tree-sitter-rust';
+import R from '@eagleoutice/tree-sitter-r';
 import PHP from 'tree-sitter-php';
 import Ruby from 'tree-sitter-ruby';
 import { requireVendoredGrammar } from '../../tree-sitter/vendored-grammars.js';
@@ -344,6 +345,13 @@ export interface FetchWrapperDef {
   functionName: string;
 }
 
+/** See {@link ExtractedDecoratorRoute.handlerReceiver}. */
+export interface RouteHandlerReceiver {
+  kind: 'type' | 'constructor' | 'module';
+  name?: string;
+  qualifier?: string;
+}
+
 export interface ExtractedDecoratorRoute {
   filePath: string;
   routePath: string;
@@ -389,6 +397,20 @@ export interface ExtractedDecoratorRoute {
    */
   handlerName?: string;
   /**
+   * Static hint for what the receiver of a qualified {@link handlerName}
+   * (`h.Method`, `pkg.Func`) is, read from the registering file's own syntax.
+   * The worker sees one file, so it records only what that file says:
+   *   - `type` — the receiver was declared or built as `name` (`h := &T{}`,
+   *     `var h *T`, a `h *pkg.T` parameter);
+   *   - `constructor` — the receiver was returned by the function `name`
+   *     (`h := NewT(...)`), whose declared result type names the owner;
+   *   - `module` — the receiver is the import `qualifier` (`pkg.Func`).
+   * `qualifier` is the import local name the type or constructor was reached
+   * through, when there is one. Only the route file's provider reads this, via
+   * `LanguageProvider.resolveRouteHandler`; absent when nothing was inferred.
+   */
+  handlerReceiver?: RouteHandlerReceiver;
+  /**
    * Provenance for the `HANDLES_ROUTE` edge, overriding the default
    * `decorator-<decoratorName>`. Present when the route was extracted from a
    * shape that is not a decorator at all — today, JS/TS dispatch guards
@@ -418,6 +440,8 @@ export interface ExtractedToolDef {
   description: string;
   lineNumber: number;
   handlerNodeId?: string;
+  /** Unresolved registrations must not inherit unrelated same-file flows. */
+  allowFileFallback?: false;
 }
 
 export interface ExtractedORMQuery {
@@ -576,6 +600,7 @@ const languageMap: Record<string, TreeSitterLanguage> = {
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   [SupportedLanguages.PHP]: PHP.php_only,
   [SupportedLanguages.Ruby]: Ruby,
+  [SupportedLanguages.R]: R,
   [SupportedLanguages.Vue]: TypeScript.typescript,
   ...(Dart ? { [SupportedLanguages.Dart]: Dart } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
@@ -656,7 +681,9 @@ function findEnclosingClassNode(node: SyntaxNode): SyntaxNode | null {
  * a type (`resolveFileTypeOwner`, e.g. a Zig file-struct), the tree root is
  * the owner node the method/field extractors should read members from. Same
  * root, same name as `findEnclosingClassInfo`'s root branch, so member ids and
- * owner ids agree.
+ * owner ids agree. Failing both, the provider's `resolveMemberOwnerNode` gets
+ * the last word (languages whose members belong to a call/assignment rather
+ * than an enclosing container node, e.g. R's `R6Class(...)`).
  */
 function findEnclosingClassNodeOrFileOwner(
   node: SyntaxNode,
@@ -665,10 +692,12 @@ function findEnclosingClassNodeOrFileOwner(
 ): SyntaxNode | null {
   const container = findEnclosingClassNode(node);
   if (container !== null) return container;
-  if (provider.resolveFileTypeOwner === undefined) return null;
-  let root: SyntaxNode = node;
-  while (root.parent) root = root.parent;
-  return provider.resolveFileTypeOwner(root, filePath) !== null ? root : null;
+  if (provider.resolveFileTypeOwner !== undefined) {
+    let root: SyntaxNode = node;
+    while (root.parent) root = root.parent;
+    if (provider.resolveFileTypeOwner(root, filePath) !== null) return root;
+  }
+  return provider.resolveMemberOwnerNode?.(node) ?? null;
 }
 
 /**
@@ -1664,6 +1693,7 @@ const processFileGroup = (
     // node id → graph node id for classes THIS file's capture loop materialized.
     // Keyed by in-memory AST identity (never persisted); filled below.
     const classOwnersByNodeId = new Map<number, string>();
+    const callableBindings = new Map<number, string>();
 
     // #2687: ONE pass over `matches` yields both suppression sets — the
     // definition-name claims by rank (callable > Property > value), so the dedup
@@ -3102,6 +3132,11 @@ const processFileGroup = (
         }),
       });
 
+      // Keep actual emitted identities; providers must not reconstruct graph IDs.
+      if (nameNode && (nodeLabel === 'Function' || nodeLabel === 'Method')) {
+        callableBindings.set(nameNode.id, nodeId);
+      }
+
       // enclosingClassId already computed above (before nodeId generation)
       const ownerId = enclosingClassId ?? objectLiteralOwnerInfo?.ownerId;
 
@@ -3202,6 +3237,23 @@ const processFileGroup = (
           });
         }
       }
+    }
+
+    if (provider.extractToolDefinitions) {
+      // Distinct lexical declarations can share a graph ID (for example, sibling
+      // block-scoped functions). Such IDs cannot prove which handler owns a tool.
+      const seenCallableIds = new Set<string>();
+      const ambiguousCallableIds = new Set<string>();
+      for (const nodeId of callableBindings.values()) {
+        if (seenCallableIds.has(nodeId)) ambiguousCallableIds.add(nodeId);
+        seenCallableIds.add(nodeId);
+      }
+      for (const [bindingId, nodeId] of callableBindings) {
+        if (ambiguousCallableIds.has(nodeId)) callableBindings.delete(bindingId);
+      }
+      result.toolDefs.push(
+        ...provider.extractToolDefinitions(tree, file.path, lineOffset, callableBindings),
+      );
     }
 
     // Extract framework routes via provider detection (e.g., Laravel routes.php)

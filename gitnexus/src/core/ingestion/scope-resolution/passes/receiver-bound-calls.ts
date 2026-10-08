@@ -184,7 +184,10 @@ type ReceiverBoundProviderSubset = Pick<
   | 'stripTypePreservingDecoration'
   | 'resolveQualifiedReceiverMember'
   | 'namespaceReceiverPaths'
+  | 'namespaceBindingIdentity'
+  | 'namespaceSkipsEnclosingClasses'
   | 'resolveReceiverMember'
+  | 'suppressReceiverLookup'
   | 'resolveThisViaEnclosingClass'
   | 'resolveMissingReceiverMembersFromSubtypes'
   | 'missingReceiverSubtypeCandidateCompatibility'
@@ -196,6 +199,7 @@ type ReceiverBoundProviderSubset = Pick<
   | 'normalizeTypeArgument'
   | 'markConstructionSites'
   | 'namespaceExportsIncludeImportedNames'
+  | 'importsBindAtLexicalScope'
   | 'resolveNamespaceChains'
 >;
 
@@ -503,7 +507,8 @@ export function emitReceiverBoundCalls(
       const key = segments.slice(0, k).join('.');
       const files = namespaceTargets.get(key);
       if (files === undefined) continue;
-      if (isNamespaceNameShadowed(key, inScope, scopes)) return undefined;
+      if (isNamespaceNameShadowed(key, inScope, scopes, provider.namespaceSkipsEnclosingClasses))
+        return undefined;
       cursor = { files };
       rest = segments.slice(k);
       break;
@@ -557,13 +562,18 @@ export function emitReceiverBoundCalls(
         : uniqueClassAcross(cursor.files, tail);
     }
     const files = namespaceTargets.get(head);
-    if (files === undefined || isNamespaceNameShadowed(head, inScope, scopes)) return undefined;
+    if (
+      files === undefined ||
+      isNamespaceNameShadowed(head, inScope, scopes, provider.namespaceSkipsEnclosingClasses)
+    )
+      return undefined;
     return uniqueClassAcross(files, tail);
   };
   const compoundOpts = {
     fieldFallback,
     elementTypeOf: provider.elementTypeOf,
     namespaceExportsIncludeImportedNames: provider.namespaceExportsIncludeImportedNames === true,
+    namespaceSkipsEnclosingClasses: provider.namespaceSkipsEnclosingClasses,
     hoistTypeBindingsToModule,
     stripReceiverCastExpressions: provider.stripReceiverCastExpressions === true,
     constructionSyntax: provider.constructionSyntax,
@@ -1032,20 +1042,30 @@ export function emitReceiverBoundCalls(
   };
 
   for (const parsed of parsedFiles) {
-    const namespaceTargets = collectNamespaceTargets(parsed, scopes, {
-      receiverPaths: provider.namespaceReceiverPaths,
-      moduleFileExists: (filePath) => index.moduleScopeByFile.has(filePath),
-    });
-    const fileCompoundOpts = {
-      ...compoundOpts,
-      namespaceTargets,
-      ...(walkChains
-        ? {
-            resolveQualifiedClass: (qualifiedName: string, inScope: ScopeId) =>
-              resolveNamespaceQualifiedClass(qualifiedName, inScope, namespaceTargets),
-          }
-        : {}),
+    const namespaceContext = (inScope?: ScopeId) => {
+      const namespaceTargets = collectNamespaceTargets(parsed, scopes, {
+        receiverPaths: provider.namespaceReceiverPaths,
+        bindingIdentity: provider.namespaceBindingIdentity,
+        skipEnclosingClasses: provider.namespaceSkipsEnclosingClasses,
+        moduleFileExists: (filePath) => index.moduleScopeByFile.has(filePath),
+        inScope,
+      });
+      return {
+        namespaceTargets,
+        fileCompoundOpts: {
+          ...compoundOpts,
+          namespaceTargets,
+          ...(walkChains
+            ? {
+                resolveQualifiedClass: (qualifiedName: string, scopeId: ScopeId) =>
+                  resolveNamespaceQualifiedClass(qualifiedName, scopeId, namespaceTargets),
+              }
+            : {}),
+        },
+      };
     };
+    const fileNamespaces = namespaceContext();
+    const namespacesByScope = new Map<ScopeId, ReturnType<typeof namespaceContext>>();
     // Per-file resolved-callee-id capture context (#2227 U2). Built once per
     // file; `undefined` when the sink is absent (pdg off) so the `tryEmitEdge`
     // capture is a no-op and emission stays byte-identical (R4).
@@ -1058,9 +1078,44 @@ export function emitReceiverBoundCalls(
       if (site.kind !== 'call' && site.kind !== 'read' && site.kind !== 'write') continue;
       if (site.explicitReceiver === undefined) continue;
 
+      let namespaces = fileNamespaces;
+      if (provider.importsBindAtLexicalScope === true) {
+        let scoped = namespacesByScope.get(site.inScope);
+        if (scoped === undefined) {
+          scoped = namespaceContext(site.inScope);
+          namespacesByScope.set(site.inScope, scoped);
+        }
+        namespaces = scoped;
+      }
+      const { namespaceTargets, fileCompoundOpts } = namespaces;
+
       const receiverName = site.explicitReceiver.name;
       const memberName = site.name;
       const siteKey = `${parsed.filePath}:${site.atRange.startLine}:${site.atRange.startCol}`;
+
+      if (provider.suppressReceiverLookup !== undefined) {
+        const baseName =
+          decodeReceiverChain(site.receiverChain)?.baseReceiverName ??
+          receiverName.split(/[.([\s]/, 1)[0];
+        const baseTypeRef =
+          baseName === undefined
+            ? undefined
+            : findReceiverTypeBinding(site.inScope, baseName, scopes);
+        if (baseTypeRef !== undefined && provider.suppressReceiverLookup(baseTypeRef)) {
+          options.recordResolutionOutcome?.({
+            kind: 'suppressed',
+            reason: 'receiver-unresolved',
+            candidateIds: [],
+            phase: 'receiver-bound-calls',
+            filePath: parsed.filePath,
+            name: site.name,
+            range: site.atRange,
+            siteKind: site.kind,
+          });
+          handledSites.add(siteKey);
+          continue;
+        }
+      }
 
       // ── owned-but-unbound receiver ───────────────────────────────
       // The language declared this scope REBINDS the receiver and gave
@@ -1519,7 +1574,7 @@ export function emitReceiverBoundCalls(
       }
 
       // ── Case 1: namespace receiver ───────────────────────────────
-      // `namespaceTargets` is collected per FILE, so a local declaration that
+      // `namespaceTargets` contains imports, so a local declaration that
       // shadows the import must suppress it — `def f(pkg): pkg.db.query()`
       // calls a method on the PARAMETER, and resolving it through the import
       // emits a wrong edge, not a missing one. The compound-receiver
@@ -1534,7 +1589,12 @@ export function emitReceiverBoundCalls(
       const namespaceCandidates = namespaceTargets.get(receiverName);
       let targetFiles: readonly string[] | undefined =
         namespaceCandidates !== undefined &&
-        !isNamespaceNameShadowed(receiverName, site.inScope, scopes)
+        !isNamespaceNameShadowed(
+          receiverName,
+          site.inScope,
+          scopes,
+          provider.namespaceSkipsEnclosingClasses,
+        )
           ? namespaceCandidates
           : undefined;
       // Chain walk: `hub.sub.helper()` / `hub.sub.Thing{}` — the receiver is
@@ -2344,6 +2404,7 @@ export function emitReceiverBoundCalls(
             const ambiguousCandidateIds = new Set<string>();
             const unknownCompatibilityCandidateIds = new Set<string>();
             const incompleteInheritanceSubtypeIds = new Set<string>();
+            const missingMemberSubtypeIds = new Set<string>();
             const visitedSubtypeIds = new Set<string>([ownerDef.nodeId]);
             const subtypeQueue = [ownerDef.nodeId];
             let subtypeHead = 0;
@@ -2449,7 +2510,13 @@ export function emitReceiverBoundCalls(
                   // indexed MRO, leaving this subtype's target unproven.
                   incompleteInheritanceSubtypeIds.add(subtype.nodeId);
                 }
-                if (subtypeAmbiguous || picked === undefined) continue;
+                if (subtypeAmbiguous) continue;
+                if (picked === undefined) {
+                  // This runtime subtype has no proven binding. Preserve
+                  // partial coverage even when a sibling supplies a target.
+                  missingMemberSubtypeIds.add(subtype.nodeId);
+                  continue;
+                }
                 subtypeTargets.set(picked.nodeId, picked);
               }
             }
@@ -2473,6 +2540,7 @@ export function emitReceiverBoundCalls(
                 ...ambiguousCandidateIds,
                 ...unknownCompatibilityCandidateIds,
                 ...incompleteInheritanceSubtypeIds,
+                ...missingMemberSubtypeIds,
               ]),
               MAX_INTERFACE_DISPATCH_FANOUT,
             );

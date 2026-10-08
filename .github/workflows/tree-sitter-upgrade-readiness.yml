@@ -52,7 +52,7 @@ jobs:
       report: ${{ steps.readiness.outputs.report }}
       exit_code: ${{ steps.readiness.outputs.exit_code }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -172,7 +172,8 @@ jobs:
                 // `|$`), so change-detection fires on status transitions, not on
                 // unrelated cell drift (e.g. an upstream-ABI bump). Mirror this in
                 // _ROW_DIFF_RE in test_check_tree_sitter_upgrade_readiness.py.
-                for (const m of md.matchAll(/\| `(tree-sitter-[^`]+)` \|.*\| ([^|]+?) \|$/gm)) {
+                // The grammar name may be scoped (`@eagleoutice/tree-sitter-r`).
+                for (const m of md.matchAll(/\| `((?:@[^\/`]+\/)?tree-sitter-[^`]+)` \|.*\| ([^|]+?) \|$/gm)) {
                   map[m[1]] = m[2].trim();
                 }
                 return map;

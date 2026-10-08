@@ -800,7 +800,63 @@ import { copyV8CacheIfPresent, tryLoadV8Cache, writeV8CacheFile } from './v8-sid
 // v117 (#3390 private-only successor): simple-positional call entries now carry
 // their count privately, while ordinary Python references no longer receive
 // synthetic arity. Warm v116 ParsedFiles have neither equivalent fact.
-const SCHEMA_BUMP = 117;
+// v118 (#3398): decorated Python methods with unproven decorator identity no
+// longer publish subtype positional capacity. Warm v117 side-channel snapshots
+// would retain that capacity and could emit a false concrete call target.
+// v119 (#3396): Python subtype method capacities now omit receiverless ordinary
+// methods. Warm v118 ParsedFiles would replay a false compatible target.
+// v120 (#3394): decorated Python method receiver bindings now distinguish
+// unproven decorators from instance receivers. Warm v119 ParsedFiles would
+// replay a fabricated `self` binding or lack the uncertainty marker entirely.
+// v121 (#3399 follow-up): Python decorator identity now ignores trailing
+// comments, honors rebinding of builtin descriptor names visible where the
+// decorator is evaluated, and withholds subtype capacity from descriptor
+// stacks. Warm v120 captures carry the old verdicts.
+// v122 (#3414): Python decorator identity models restoring helper calls and
+// treats match-pattern captures and nested nonlocal rebinds as shadowing.
+// Warm v121 captures carry the old verdicts.
+// v123 (#3408): FastAPI include records now carry `host`, router imports carry
+// `modulePath`, and unprefixed child includes are emitted. Warm v122 records
+// lack them, so nested router-prefix propagation would stay inert.
+// v124 (#3402): Go files now emit gin/echo `decoratorRoutes` carrying a
+// `handlerReceiver` hint. Warm v123 Go worker results carry no routes.
+// v125 (#3402): Go route hints now honor lexical declarations and captured writes;
+// namespace imports retain whether their local name comes from the package clause.
+// v126 (#3446): SDK positional tool registrations now emit tool definitions,
+// exact handler identities, and an opt-out from unrelated file-level flows.
+// Warm v125 worker results omit these definitions and must be re-extracted.
+// v127 (#3450): Destructured member writes invalidate SDK registration evidence.
+// Warm v126 worker results can retain false tools after a method replacement.
+// v128 (#3450): SDK namespace imports now prove positional tool receivers.
+// Warm v127 worker results omit these definitions and must be re-extracted.
+// v129 (#3499): Python/PHP/Ruby declaration bindings now preserve language-
+// specific module visibility. Warm v128 ParsedFiles retain the old binding
+// placement and can lose valid calls when finalized by the new projection.
+// v130 (#3502): Python globals use exact function/class block ownership and
+// Ruby ordinary-method binding uses AST markers. Warm v129 ParsedFiles retain
+// incorrect declaration scopes and must be re-extracted.
+// v131 (#3504): Python namespace imports retain explicit alias syntax. Warm
+// v130 ParsedFiles lack this fact and can bind a root-spelled alias to the
+// package root instead of the imported module.
+// v132: R provider fixes, collapsed into one bump because none of them has
+// shipped. R scope queries anchor a `@scope.function` on every named-function
+// assignment and named function-valued argument (the same nodes the
+// `@declaration.function`/`@declaration.method` anchors use), so each def is
+// owned by its own Function scope instead of the module/Class scope, and
+// capture the `pkg::`/`pkg:::` qualifier of namespaced calls as
+// `@reference.qualified-name` so it reaches `site.rawQualifiedName`. The R
+// provider also keeps only the argument that names an S4 definition
+// (shouldSkipDefinitionCapture), so `setClass("A", contains = "VIRTUAL")` no
+// longer defines a Class `VIRTUAL`, `setGeneric(..., valueClass = "numeric")` a
+// Function `numeric`, nor `setMethod("show", "Foo", ...)` a Method `Foo`; the R
+// scope emitter likewise keeps only the argument that names a `setClass` class
+// or a `library`/`require`/`source` import, so `library(lib.loc = libO, pkgP)`
+// no longer imports `libO` and a comment before the first argument no longer
+// hides the class or import. Definitions and scope captures are parse-time
+// facts replayed verbatim from the warm cache, so stale ones (the pre-fix scope
+// tree, the unqualified call-site shape, the mis-selected arguments) would
+// persist on unchanged files; both stores must re-extract.
+const SCHEMA_BUMP = 132;
 const GITNEXUS_PKG_VERSION = (() => {
   try {
     // package.json sits at gitnexus/package.json — two levels up from
