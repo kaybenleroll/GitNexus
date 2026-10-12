@@ -78,20 +78,41 @@ describe('R function definitions and calls', () => {
 
   it('resolves library() to IMPORTS edges for all package files', () => {
     const imports = getRelationships(result, 'IMPORTS');
-    const libEdges = imports.filter(
-      (e) => e.sourceFilePath.includes('run_analysis.R') && e.targetFilePath.includes('pkgB/'),
-    );
-    expect(libEdges.length).toBeGreaterThanOrEqual(1);
-    expect(libEdges.some((e) => e.targetFilePath.includes('clean_data.R'))).toBe(true);
+    const libTargets = imports
+      .filter((e) => e.sourceFilePath === 'scripts/run_analysis.R')
+      .map((e) => e.targetFilePath)
+      .filter((t) => t.startsWith('pkgB/'))
+      .sort();
+    // library("pkgB") fans out to exactly the files of pkgB (no pkgA/pkgC leakage, no extras).
+    expect(libTargets).toEqual([
+      'pkgB/R/clean_data.R',
+      'pkgB/R/export_namespace_variants.R',
+      'pkgB/R/export_scope.R',
+      'pkgB/R/s4_export_test.R',
+    ]);
   });
 
   it('resolves require() to IMPORTS edges for package files', () => {
     const imports = getRelationships(result, 'IMPORTS');
-    const requireEdges = imports.filter(
-      (e) => e.sourceFilePath.includes('run_analysis.R') && e.targetFilePath.includes('pkgA/R/'),
-    );
-    // require("pkgA") should resolve to at least one file in pkgA/R/
-    expect(requireEdges.length).toBeGreaterThanOrEqual(1);
+    const requireTargets = imports
+      .filter((e) => e.sourceFilePath === 'scripts/run_analysis.R')
+      .map((e) => e.targetFilePath)
+      .filter((t) => t.startsWith('pkgA/R/'))
+      .sort();
+    // require("pkgA") (and source("pkgA/R/utils.R")) cover exactly the files of pkgA.
+    expect(requireTargets).toEqual([
+      'pkgA/R/add_outliers.R',
+      'pkgA/R/dot_names.R',
+      'pkgA/R/export_scope.R',
+      'pkgA/R/models.R',
+      'pkgA/R/r6_advanced.R',
+      'pkgA/R/r6_bare.R',
+      'pkgA/R/s3.R',
+      'pkgA/R/s4_and_r6.R',
+      'pkgA/R/s4_multi_parent.R',
+      'pkgA/R/super_assign.R',
+      'pkgA/R/utils.R',
+    ]);
   });
 
   // --- Cross-package resolution ---
@@ -130,9 +151,7 @@ describe('R function definitions and calls', () => {
   it('emits HAS_METHOD edges from R6 class to its methods', () => {
     const hasMethod = getRelationships(result, 'HAS_METHOD');
     const r6Methods = hasMethod.filter((e) => e.source === 'ResultSet');
-    expect(r6Methods.length).toBeGreaterThanOrEqual(2);
-    expect(r6Methods.some((e) => e.target === 'initialize')).toBe(true);
-    expect(r6Methods.some((e) => e.target === 'count')).toBe(true);
+    expect(r6Methods.map((e) => e.target).sort()).toEqual(['count', 'initialize']);
   });
 
   it('emits HAS_METHOD edge from R5 class to its methods', () => {
@@ -374,20 +393,44 @@ describe('R function definitions and calls', () => {
     expect(itemsField).toBeDefined();
     expect(itemsField!.properties.visibility).toBe('public');
   });
+});
 
-  // --- Negative tests ---
+/**
+ * Files the R provider must not index. The `r-non-indexed` fixture holds a
+ * `.Rprofile`, `.Renviron`, `.Rmd` and `.qmd`, each defining a function, next to a plain
+ * `real.R` positive control (docs/languages/r-provider.md, "Limits").
+ */
+describe('R files that are not indexed', () => {
+  let result: PipelineResult;
 
-  it('does not index .Rprofile or .Renviron files', () => {
-    const allNodes: string[] = [];
-    result.graph.forEachNode((n) => {
-      if (
-        n.properties.filePath?.includes('.Rprofile') ||
-        n.properties.filePath?.includes('.Renviron')
-      ) {
-        allNodes.push(n.properties.name);
-      }
-    });
-    expect(allNodes).toHaveLength(0);
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(path.join(FIXTURES, 'r-non-indexed'), () => {});
+  }, 60000);
+
+  it('indexes the plain .R control file (so the negatives below are not vacuous)', () => {
+    expect(getNodesByLabel(result, 'Function')).toEqual(['indexed_control']);
+  });
+
+  // The scanner may still record a bare File node for these; what must not exist is any
+  // parsed symbol (Function, Variable, ...) from them.
+  it.each(['.Rprofile', '.Renviron', 'analysis.Rmd', 'report.qmd'])(
+    'creates no symbol node for %s',
+    (name) => {
+      const hits: string[] = [];
+      result.graph.forEachNode((n) => {
+        if (n.label !== 'File' && n.properties.filePath?.endsWith(name)) {
+          hits.push(`${n.label}:${n.properties.name}`);
+        }
+      });
+      expect(hits).toEqual([]);
+    },
+  );
+
+  it('defines no function from the non-indexed files', () => {
+    const functions = getNodesByLabel(result, 'Function');
+    expect(functions).not.toContain('rprofile_fn');
+    expect(functions).not.toContain('rmd_fn');
+    expect(functions).not.toContain('qmd_fn');
   });
 });
 
@@ -680,12 +723,13 @@ describe('R caller attribution', () => {
 });
 
 /**
- * R native pipe (`|>`) chains: characterisation of the current behaviour. Every
- * assertion here passes without any pipe-specific production support.
+ * R native pipe (`|>`) chains: characterisation of the current behaviour. There is no
+ * pipe-specific production support; the stages resolve as ordinary calls.
  * The fixture is synthetic (`r-native-pipes/`, three packages); one function per
  * scenario so each assertion is an exact `source -> targets` set.
  * magrittr `%>%` is deliberately NOT covered (no support claimed either way).
- * The `pkg::fn` stages are bound by their qualifier, not guessed by name.
+ * The `pkg::fn` stages are bound by their qualifier, not guessed by name (the cases marked
+ * "qualifier flip" differ from a name-only guess).
  */
 describe('R native pipe chains', () => {
   let result: PipelineResult;
@@ -1231,10 +1275,26 @@ describe('R importFrom(pkgB, CleanData) in the shared r-packages fixture', () =>
   });
 
   it('links pkgA R files to the pkgB file that defines the imported name', () => {
-    const imports = getRelationships(result, 'IMPORTS').filter(
-      (e) => e.sourceFilePath.startsWith('pkgA/R/') && e.targetFilePath === 'pkgB/R/clean_data.R',
-    );
-    expect(imports.length).toBeGreaterThanOrEqual(1);
+    const importers = getRelationships(result, 'IMPORTS')
+      .filter((e) => e.targetFilePath === 'pkgB/R/clean_data.R')
+      .map((e) => e.sourceFilePath)
+      .filter((f) => f.startsWith('pkgA/'))
+      .sort();
+    // pkgA/NAMESPACE importFrom(pkgB, CleanData) links every pkgA R file (package-wide
+    // namespace import) to the defining file, once each.
+    expect(importers).toEqual([
+      'pkgA/R/add_outliers.R',
+      'pkgA/R/dot_names.R',
+      'pkgA/R/export_scope.R',
+      'pkgA/R/models.R',
+      'pkgA/R/r6_advanced.R',
+      'pkgA/R/r6_bare.R',
+      'pkgA/R/s3.R',
+      'pkgA/R/s4_and_r6.R',
+      'pkgA/R/s4_multi_parent.R',
+      'pkgA/R/super_assign.R',
+      'pkgA/R/utils.R',
+    ]);
   });
 });
 
