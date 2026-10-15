@@ -86,6 +86,7 @@ Not supported:
 - Roxygen `@param` types live in the per-file type environment; no graph edge consumes them.
 - Argument matching follows R for named and reordered arguments but does not model partial argument names: `setClass(Cla = "D")`, `new(Cla = "E")`, `setRefClass(Cla = "A")` and `setMethod("show", sig = "Foo")` are not recognised, so no definition or owner is attached.
 - Members are read only from the named forms. The positional second argument of `setClass("A", representation(x = "numeric"))`, `R6Class("X", list(...))` and `setRefClass("A", list(...))` creates no field or slot nodes; use `slots=` / `representation=`, `public =` / `private =` / `active =` and `fields =`.
+- S4 and RefClass constructors are recognised only as a bare callee: `setClass(...)`, `setRefClass(...)`, `setGeneric(...)` and `setMethod(...)`. A namespace-qualified call such as `methods::setClass("A", slots = list(x = "numeric"))` creates no class, slot, generic or method. `R6::R6Class(...)` is recognised.
 - For `S3method(generic, class, method)` the positional third argument names the exported method. A named third argument such as `S3method(print, foo, method = impl)` is not read: R registers `impl`, but the export is recorded for `print.foo`.
 - A leading `]` in a bracket expression of a NAMESPACE `exportPattern()` (for example `[]a]` or `[^]a]`) is read with JavaScript RegExp semantics, not POSIX/TRE, unless the pattern also contains a POSIX class such as `[:digit:]`; R would treat that `]` as a literal member.
 
@@ -118,7 +119,7 @@ Not modelled:
 - **Succeeds:** a plain function (`name <- function(...)`) and the calls the graph resolves to it, in one file or across files. A same-named parameter is claimed as a binding and left alone.
 - **Refused (`unsupported_occurrence`, planning status `unsupported`):**
   - any target that is not a plain `Function` (S4 classes, R6 classes, members);
-  - a function whose old or new name is spelled as a string literal anywhere in the indexed R sources (`UseMethod("area")`, `do.call("f", ...)`, `match.fun`, `get`, `setGeneric`, ...), because string lookup is not resolved;
+  - a function whose old or new name is the whole value of a string literal anywhere in the indexed R sources (`UseMethod("area")`, `do.call("f", ...)`, `match.fun`, `get`, `setGeneric`, ...), because string lookup is not resolved. The literal is decoded first, so escapes (`"f\x6fo"`, `"\u{66}oo"`, octal) and raw strings (`r"(foo)"`) count. A string that only contains the name (`"foo(1)"`), a name built at run time (`paste0("fo", "o")`), and strings in files that are not indexed R sources (R Markdown, `NAMESPACE`) are not detected;
   - a new name `generic.class` whose prefix is an existing function, which would register an S3 method;
   - a package function under `R/` that `NAMESPACE` does not mark private (`isExported` is not false), because `NAMESPACE` is not an indexed source and its `export()` or `S3method()` entry would go stale.
 - **Refused by the shared engine (fail-closed, not provider code):** S3 methods and any dotted function name (`area.circle` reads as an owner-qualified member, so `stale_graph`); S4 class names (`unsupported_occurrence`, no exact source-name span); R6 methods (`stale_graph`).
