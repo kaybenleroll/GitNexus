@@ -67,9 +67,11 @@ function translateBracket(src: string, start: number): { text: string; end: numb
     if (ch === '[' && src[i + 1] === ':') {
       const close = src.indexOf(':]', i + 2);
       if (close === -1) return null;
-      const expansion = POSIX_CLASSES[src.slice(i + 2, close)];
-      if (expansion === undefined) return null;
-      out += expansion;
+      // An own-property lookup: `constructor`, `toString` or `__proto__` would otherwise
+      // resolve on the prototype chain and splice that function's source text into the pattern.
+      const name = src.slice(i + 2, close);
+      if (!Object.hasOwn(POSIX_CLASSES, name)) return null;
+      out += POSIX_CLASSES[name];
       i = close + 2;
     } else if (ch === '\\' && i + 1 < src.length) {
       out += ch + src[i + 1];
@@ -182,8 +184,10 @@ const SIMPLE_R_ESCAPES: Readonly<Record<string, string>> = {
 /**
  * Turn the body of an R string literal (the text between the quotes) into the
  * string value R would hold: `\\` -> `\`, `\"` -> `"`, `\n` -> newline, and
- * likewise `\t \r \a \b \f \v \' \``, backslash-space, `\xHH`,
- * `\uXXXX` / `\u{X..}` and `\UXXXXXXXX` / `\U{X..}` (code points). R
+ * likewise `\t \r \a \b \f \v \' \``, backslash-space, `\x` (1-2 hex digits), `\u`
+ * (1-4 hex digits, bare or in braces) and `\U` (1-8 hex digits, bare or in braces),
+ * the last two as code points. The digit limits are R's own: a longer run is not
+ * part of the escape (tree-sitter-r's `escape_sequence` has the same limits). R
  * rejects any other backslash sequence; this leniently keeps it verbatim, so a
  * mistaken `"\."` still reaches the regex compiler as `\.`. Never throws.
  */

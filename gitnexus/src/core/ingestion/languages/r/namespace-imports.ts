@@ -42,6 +42,7 @@
 import type { ParsedFile, ParsedImport } from 'gitnexus-shared';
 import type { RPackageConfig } from './package-config.js';
 import { unescapeRString } from './export-pattern.js';
+import { rBareName } from './bare-name.js';
 import { resolveRNamedImport } from '../../import-resolvers/r.js';
 
 /** One `importFrom(pkg, name)` pair, in NAMESPACE file order. */
@@ -217,10 +218,64 @@ function nestedIfCondition(text: string, i: number): number | null {
 }
 
 /**
+ * Where each `{ … }` block of NAMESPACE text ends, answered in constant time after one linear
+ * pass over the text. Scanning a block from its own `{` instead costs a pass over the rest of
+ * the file whenever the block never closes, and a file of `if (a) {` lines with no `}` made
+ * that quadratic (a 300 KB input took 8.8 s).
+ *
+ * The pass tokenises like the block scan it replaces: `#` comments run to the end of the line,
+ * a quote that does not close on its line aborts every block still open at that point, and a
+ * `}` closes the innermost open one. A comment or a quote never spans lines, so every line
+ * start is a clean token boundary and the tokens from any `{` the directive scanner reaches
+ * are the same as the tokens of the pass from the start of the text.
+ */
+class BraceBlocks {
+  private ends: Map<number, number> | undefined;
+
+  constructor(private readonly text: string) {}
+
+  /** The index just after the `}` closing the block opened at `open`; `-1` when it never closes. */
+  endOf(open: number): number {
+    this.ends ??= this.index();
+    return this.ends.get(open) ?? -1;
+  }
+
+  private index(): Map<number, number> {
+    const { text } = this;
+    const ends = new Map<number, number>();
+    const open: number[] = [];
+    for (let i = 0; i < text.length; ) {
+      const ch = text[i];
+      if (ch === '#') {
+        i = skipLineComment(text, i);
+      } else if (isQuote(ch)) {
+        const end = skipQuoted(text, i);
+        if (end !== -1) {
+          i = end;
+          continue;
+        }
+        // An unterminated quote aborts every block open here; resume on the next line.
+        open.length = 0;
+        const newline = text.indexOf('\n', i);
+        i = newline === -1 ? text.length : newline + 1;
+      } else {
+        if (ch === '{') open.push(i);
+        else if (ch === '}') {
+          const start = open.pop();
+          if (start !== undefined) ends.set(start, i + 1);
+        }
+        i++;
+      }
+    }
+    return ends;
+  }
+}
+
+/**
  * Skip one statement following an `if (…)` / `else`: either a `{ … }` block or a
  * single directive call. Returns the index to resume scanning from.
  */
-function skipConditionalBody(text: string, from: number): number {
+function skipConditionalBody(text: string, from: number, blocks: BraceBlocks): number {
   let i = from;
   for (;;) {
     while (i < text.length && /\s/.test(text[i])) i++;
@@ -234,28 +289,8 @@ function skipConditionalBody(text: string, from: number): number {
   }
   if (i >= text.length) return i;
   if (text[i] === '{') {
-    const blockStart = i;
-    let depth = 0;
-    for (; i < text.length; ) {
-      const ch = text[i];
-      if (ch === '#') {
-        i = skipLineComment(text, i);
-        continue;
-      }
-      if (isQuote(ch)) {
-        const end = skipQuoted(text, i);
-        if (end === -1) return resyncAfterMalformed(text, blockStart);
-        i = end;
-        continue;
-      }
-      if (ch === '{') depth++;
-      else if (ch === '}') {
-        depth--;
-        if (depth === 0) return i + 1;
-      }
-      i++;
-    }
-    return resyncAfterMalformed(text, blockStart); // unterminated `{ … }`
+    const end = blocks.endOf(i);
+    return end === -1 ? resyncAfterMalformed(text, i) : end; // -1: unterminated `{ … }`
   }
   if (isIdentStart(text[i])) {
     let j = i + 1;
@@ -290,6 +325,7 @@ interface RawDirective {
  */
 function scanRNamespaceDirectives(text: string, heads: ReadonlySet<string>): RawDirective[] {
   const directives: RawDirective[] = [];
+  const blocks = new BraceBlocks(text);
   let i = 0;
   while (i < text.length) {
     const ch = text[i];
@@ -320,7 +356,7 @@ function scanRNamespaceDirectives(text: string, heads: ReadonlySet<string>): Raw
     if (text[k] !== '(') {
       // `else` may be followed directly by a directive with no parens of its own.
       if (head === 'else') {
-        i = skipConditionalBody(text, k);
+        i = skipConditionalBody(text, k, blocks);
         continue;
       }
       i = j;
@@ -335,7 +371,7 @@ function scanRNamespaceDirectives(text: string, heads: ReadonlySet<string>): Raw
     i = group.end;
 
     if (CONDITIONAL_HEADS.has(head)) {
-      i = skipConditionalBody(text, i);
+      i = skipConditionalBody(text, i, blocks);
       continue;
     }
     if (heads.has(head)) directives.push({ head, args: group.args });
@@ -504,13 +540,28 @@ export const TOP_LEVEL_BINDABLE_TYPES: ReadonlySet<string> = new Set(['Function'
 
 /** What one R file defines at top level, read from its Module scope. */
 export interface RFileTopLevel {
-  /** Names of top-level function/class definitions, exactly as bound (backticks kept). */
+  /**
+   * Symbols of the top-level function/class definitions: the name without the backticks it may
+   * be written in (`` `%||%` `` is `%||%`), which is how NAMESPACE entries and `importFrom()` spell it.
+   */
   readonly names: ReadonlySet<string>;
-  /** For each dotted name in {@link names}, the text after its last `.`. */
+  /**
+   * For each dotted definition, the text after the last `.` of its name as bound (backticks
+   * kept): the key the shared finalize pass indexes the definition under.
+   */
   readonly dottedTails: ReadonlySet<string>;
+  /**
+   * For each symbol in {@link names} written with backticks somewhere, every spelling bound in
+   * this file (the plain one too, when it is also bound). Empty for a file with no such name.
+   */
+  readonly writtenAs: ReadonlyMap<string, readonly string[]>;
 }
 
-const EMPTY_TOP_LEVEL: RFileTopLevel = { names: new Set(), dottedTails: new Set() };
+const EMPTY_TOP_LEVEL: RFileTopLevel = {
+  names: new Set(),
+  dottedTails: new Set(),
+  writtenAs: new Map(),
+};
 const topLevelCache = new WeakMap<ParsedFile, RFileTopLevel>();
 
 /**
@@ -524,6 +575,10 @@ const topLevelCache = new WeakMap<ParsedFile, RFileTopLevel>();
  * "is `name` defined at top level?". A `local`-origin Module binding to a
  * function/class def does. Bindings are read at extraction time, before
  * `finalizeScopeModel` adds import/wildcard bindings.
+ *
+ * A binding key keeps the backticks the definition was written with; {@link RFileTopLevel.names}
+ * is keyed by the symbol (see `rBareName`) so it can be compared with a NAMESPACE entry, and
+ * {@link RFileTopLevel.writtenAs} keeps the spelling a call site and the file's exports use.
  */
 export function rFileTopLevel(parsed: ParsedFile): RFileTopLevel {
   const cached = topLevelCache.get(parsed);
@@ -533,15 +588,26 @@ export function rFileTopLevel(parsed: ParsedFile): RFileTopLevel {
   if (moduleScope !== undefined) {
     const names = new Set<string>();
     const dottedTails = new Set<string>();
+    const writtenAs = new Map<string, string[]>();
+    const bindsTopLevel = (refs: readonly { origin: string; def: { type: string } }[]): boolean =>
+      refs.some((r) => r.origin === 'local' && TOP_LEVEL_BINDABLE_TYPES.has(r.def.type));
     for (const [name, refs] of moduleScope.bindings) {
-      if (!refs.some((r) => r.origin === 'local' && TOP_LEVEL_BINDABLE_TYPES.has(r.def.type))) {
-        continue;
+      if (!bindsTopLevel(refs)) continue;
+      const symbol = rBareName(name);
+      names.add(symbol);
+      if (symbol !== name) {
+        const spellings = writtenAs.get(symbol);
+        if (spellings === undefined) writtenAs.set(symbol, [name]);
+        else spellings.push(name);
       }
-      names.add(name);
       const dot = name.lastIndexOf('.');
       if (dot >= 0) dottedTails.add(name.slice(dot + 1));
     }
-    result = { names, dottedTails };
+    for (const [symbol, spellings] of writtenAs) {
+      const plain = moduleScope.bindings.get(symbol);
+      if (plain !== undefined && bindsTopLevel(plain)) spellings.unshift(symbol);
+    }
+    result = { names, dottedTails, writtenAs };
   }
   topLevelCache.set(parsed, result);
   return result;
@@ -550,8 +616,8 @@ export function rFileTopLevel(parsed: ParsedFile): RFileTopLevel {
 // ─── Import synthesis (populateWorkspaceReferences) ─────────────────────────
 
 /**
- * Per local package, the set of names it defines at top level in its `R/`
- * files, recorded by {@link populateRNamespaceImports} for the packages that
+ * Per local package, the set of symbols it defines at top level in its `R/`
+ * files (a backtick-quoted definition under its bare symbol), recorded by {@link populateRNamespaceImports} for the packages that
  * take part in an `importFrom()` (as caller or as provider). Keyed by the
  * `resolutionConfig` object, which reaches both this hook and the
  * free-call-fallback veto. A missing entry means "cannot decide".
@@ -592,7 +658,9 @@ interface CallerPlan {
  *  4. skip it when the caller's own package defines `name` at top level in
  *     any `R/` file (the own namespace masks its imports; `rMergeBindings`
  *     only shadows within a single scope);
- *  5. append a `named` import to every `R/` file of the caller package.
+ *  5. append a `named` import to every `R/` file of the caller package, one per spelling
+ *     the provider binds the symbol under (a definition written in backticks keeps them, so
+ *     the call site and the provider file's own export both match the import).
  */
 export function populateRNamespaceImports(
   parsedFiles: ParsedFile[],
@@ -608,7 +676,7 @@ export function populateRNamespaceImports(
     const info = cfg.namespaceInfoByPackageDir.get(dir);
     if (info === undefined || info.importFrom.length === 0) continue;
     const last = new Map<string, string>();
-    for (const entry of info.importFrom) last.set(entry.name, entry.pkg);
+    for (const entry of info.importFrom) last.set(rBareName(entry.name), entry.pkg);
     const bindable = new Map<string, string>();
     for (const [name, pkg] of last) {
       if (cfg.packages.has(pkg)) needNamesFor.add(pkg); // the fallback veto reads the provider's names too
@@ -623,6 +691,7 @@ export function populateRNamespaceImports(
 
   // One pass over the parsed files: group caller files, collect top-level names.
   const namesByPackage = new Map<string, Set<string>>();
+  const spellingsByPackage = new Map<string, Map<string, string[]>>();
   const callerFiles = new Map<string, number[]>();
   for (let i = 0; i < parsedFiles.length; i++) {
     const location = rPackageDirForFile(parsedFiles[i].filePath, cfg);
@@ -630,7 +699,15 @@ export function populateRNamespaceImports(
     if (needNamesFor.has(location.name)) {
       let names = namesByPackage.get(location.name);
       if (names === undefined) namesByPackage.set(location.name, (names = new Set()));
-      for (const name of rFileTopLevel(parsedFiles[i]).names) names.add(name);
+      const topLevel = rFileTopLevel(parsedFiles[i]);
+      for (const name of topLevel.names) names.add(name);
+      for (const [symbol, written] of topLevel.writtenAs) {
+        let bySymbol = spellingsByPackage.get(location.name);
+        if (bySymbol === undefined) spellingsByPackage.set(location.name, (bySymbol = new Map()));
+        let known = bySymbol.get(symbol);
+        if (known === undefined) bySymbol.set(symbol, (known = []));
+        for (const spelling of written) if (!known.includes(spelling)) known.push(spelling);
+      }
     }
     if (plans.has(location.name)) {
       const indices = callerFiles.get(location.name);
@@ -641,18 +718,45 @@ export function populateRNamespaceImports(
   for (const pkg of needNamesFor) if (!namesByPackage.has(pkg)) namesByPackage.set(pkg, new Set());
   packageTopLevelNames.set(cfg, namesByPackage);
 
+  // A symbol written with backticks in one file may be written plainly in another: complete the
+  // spellings before importing them.
+  if (spellingsByPackage.size > 0) {
+    for (const parsed of parsedFiles) {
+      const owner = rPackageDirForFile(parsed.filePath, cfg)?.name;
+      const bySymbol = owner === undefined ? undefined : spellingsByPackage.get(owner);
+      if (bySymbol === undefined) continue;
+      const topLevel = rFileTopLevel(parsed);
+      for (const [symbol, known] of bySymbol) {
+        if (
+          topLevel.names.has(symbol) &&
+          !topLevel.writtenAs.has(symbol) &&
+          !known.includes(symbol)
+        ) {
+          known.unshift(symbol);
+        }
+      }
+    }
+  }
+
   // Steps 4-5.
   for (const [callerName, plan] of plans) {
     const ownNames = namesByPackage.get(callerName);
     const synthesised: Extract<ParsedImport, { kind: 'named' }>[] = [];
     for (const [name, pkg] of plan.bindable) {
       if (ownNames?.has(name) === true) continue;
-      // `null` means the name can never bind. A synthesised import for it would stay unresolved
-      // yet count as an explicit name claim, suppressing the documented `global-name-fallback`.
-      // (Importing the resolver forms a cycle with import-resolvers/r.ts; every use is deferred
-      // to call time, so it is safe at runtime.)
-      if (resolveRNamedImport(cfg, pkg, name, parsedFiles) === null) continue;
-      synthesised.push({ kind: 'named', localName: name, importedName: name, targetRaw: pkg });
+      for (const spelling of spellingsByPackage.get(pkg)?.get(name) ?? [name]) {
+        // `null` means the name can never bind. A synthesised import for it would stay unresolved
+        // yet count as an explicit name claim, suppressing the documented `global-name-fallback`.
+        // (Importing the resolver forms a cycle with import-resolvers/r.ts; every use is deferred
+        // to call time, so it is safe at runtime.)
+        if (resolveRNamedImport(cfg, pkg, spelling, parsedFiles) === null) continue;
+        synthesised.push({
+          kind: 'named',
+          localName: spelling,
+          importedName: spelling,
+          targetRaw: pkg,
+        });
+      }
     }
     if (synthesised.length === 0) continue;
     for (const index of callerFiles.get(callerName) ?? []) {
@@ -689,15 +793,17 @@ export function populateRNamespaceImports(
  * veto below needs it and `qualified-call.ts` imports this file.
  */
 export function parseRQualifier(raw: string): string | undefined {
-  const match = /^([\s\S]*?)\s*:::?/.exec(raw);
-  if (match === null) return undefined;
-  let pkg = match[1].trim();
+  // Not a lazy `^([\s\S]*?)\s*::`, which is quadratic on a long run of blanks.
+  const colons = raw.indexOf('::');
+  if (colons === -1) return undefined;
+  let pkg = raw.slice(0, colons).trim();
   if (pkg.length >= 2 && /^(["'`])[\s\S]*\1$/.test(pkg)) pkg = pkg.slice(1, -1);
   return pkg.length === 0 ? undefined : pkg;
 }
 
 /**
- * Per local package, how many top-level definitions of each name it has in its
+ * Per local package, how many top-level definitions of each symbol (the name without its
+ * backticks) it has in its
  * `R/` files, recorded by `populateRQualifiedCalls` for the packages that some
  * `pkg::name()` call in the workspace names. Keyed by the `resolutionConfig`
  * object (like {@link packageTopLevelNames}), which reaches both that hook and
@@ -794,9 +900,10 @@ export function isRGlobalNameFallbackPlausible(ctx: RGlobalNameFallbackContext):
     ctx.site.rawQualifiedName === undefined
       ? undefined
       : parseRQualifier(ctx.site.rawQualifiedName);
+  const symbol = rBareName(ctx.site.name);
   if (qualifier !== undefined && cfg.packages.has(qualifier)) {
     if (rPackageDirForFile(ctx.candidate.filePath, cfg)?.name === qualifier) return true;
-    if ((rQualifiedDefinitionCount(cfg, qualifier, ctx.site.name) ?? 0) > 0) return false;
+    if ((rQualifiedDefinitionCount(cfg, qualifier, symbol) ?? 0) > 0) return false;
   }
 
   const caller = rPackageDirForFile(ctx.callerParsed.filePath, cfg);
@@ -805,7 +912,7 @@ export function isRGlobalNameFallbackPlausible(ctx: RGlobalNameFallbackContext):
   if (importFrom === undefined) return true;
 
   let lastEntry: RNamespaceImportFromEntry | undefined;
-  for (const entry of importFrom) if (entry.name === ctx.site.name) lastEntry = entry;
+  for (const entry of importFrom) if (rBareName(entry.name) === symbol) lastEntry = entry;
   if (lastEntry === undefined) return true;
   const importedFrom = lastEntry.pkg;
   if (importedFrom === caller.name) return true;
@@ -816,7 +923,7 @@ export function isRGlobalNameFallbackPlausible(ctx: RGlobalNameFallbackContext):
 
   if (cfg.packages.has(importedFrom)) {
     const providerNames = rRecordedPackageTopLevelNames(cfg)?.get(importedFrom);
-    if (providerNames === undefined || !providerNames.has(ctx.site.name)) return true;
+    if (providerNames === undefined || !providerNames.has(symbol)) return true;
   }
   return false;
 }

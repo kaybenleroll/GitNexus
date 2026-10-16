@@ -120,3 +120,76 @@ describe('R field extractor: slots attach to the Class argument', () => {
     expect(propertyOwner(source)).toBeNull();
   });
 });
+
+describe('RFieldExtractor: slots = c(...) / fields = c(...)', () => {
+  const details = (source: string) =>
+    extractor
+      .extract(classCall(source), context)
+      ?.fields.map((f) => [f.name, f.type] as [string, string | null]);
+
+  it('reads the names and types of a named vector', () => {
+    expect(details('setClass("A", slots = c(a = "numeric", b = "character"))')).toEqual([
+      ['a', 'numeric'],
+      ['b', 'character'],
+    ]);
+    expect(details('setRefClass("R", fields = c(n = "numeric"))')).toEqual([['n', 'numeric']]);
+  });
+
+  it('reads the strings of an unnamed vector as untyped names', () => {
+    expect(details('setClass("A", slots = c("a", "b"))')).toEqual([
+      ['a', null],
+      ['b', null],
+    ]);
+    expect(details('setRefClass("R", fields = c("n"))')).toEqual([['n', null]]);
+  });
+
+  it('keeps named and unnamed entries of one vector together', () => {
+    expect(details('setClass("A", slots = c("a", b = "numeric"))')).toEqual([
+      ['a', null],
+      ['b', 'numeric'],
+    ]);
+  });
+
+  it('does not read an unnamed string of representation() or list()', () => {
+    expect(
+      details('setClass("A", representation = representation("VIRTUAL", x = "numeric"))'),
+    ).toEqual([['x', 'numeric']]);
+    expect(details('setClass("A", slots = list("a"))')).toBeUndefined();
+  });
+});
+
+describe('RFieldExtractor: the type of an R6 field default that is an NA constant', () => {
+  // The grammar parses every NA constant as an `na` node, not as an identifier.
+  const r6Types = (defaults: string) => {
+    const tree = parser.parse(`X <- R6::R6Class("X", public = list(${defaults}))`);
+    const assignment = tree.rootNode.descendantsOfType('binary_operator')[0];
+    return extractor
+      .extract(assignment, context)
+      ?.fields.map((f) => [f.name, f.type] as [string, string | null]);
+  };
+
+  it('types each typed NA constant, and plain NA as logical', () => {
+    expect(
+      r6Types(
+        'a = NA_character_, b = NA_integer_, c = NA_real_, d = NA_complex_, e = NA, f = TRUE',
+      ),
+    ).toEqual([
+      ['a', 'character'],
+      ['b', 'integer'],
+      ['c', 'numeric'],
+      ['d', 'complex'],
+      ['e', 'logical'],
+      ['f', 'logical'],
+    ]);
+  });
+
+  it('leaves the other defaults as they were', () => {
+    expect(r6Types('i = 5L, n = 2.5, s = "x", z = NULL, o = other_value')).toEqual([
+      ['i', 'integer'],
+      ['n', 'numeric'],
+      ['s', 'character'],
+      ['z', null],
+      ['o', null],
+    ]);
+  });
+});

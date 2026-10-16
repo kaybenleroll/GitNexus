@@ -30,6 +30,7 @@ import {
   type RNamespaceInfo,
   type RPackageConfig,
 } from './package-config.js';
+import { rBareName } from './bare-name.js';
 import { rOwningPackageDir } from './namespace-imports.js';
 import type { GraphNode } from 'gitnexus-shared';
 import { SupportedLanguages } from 'gitnexus-shared';
@@ -63,7 +64,11 @@ export const attachDeferredROwners = (
       typeof node.properties.ownerNameHint === 'string' ? node.properties.ownerNameHint : null;
     if (!ownerNameHint) return;
 
-    const classDefs = model.types.lookupClassByName(ownerNameHint);
+    // The class registry is shared by every language, so a Python `Circle` next to an R
+    // `Circle` must not make the name ambiguous, nor stand in for an R class that is absent.
+    const classDefs = model.types
+      .lookupClassByName(ownerNameHint)
+      .filter((def) => graph.getNode(def.nodeId)?.properties.language === SupportedLanguages.R);
     if (classDefs.length !== 1) return; // ambiguous or not found — leave hint for debugging
     const ownerId = classDefs[0].nodeId;
 
@@ -137,9 +142,11 @@ export const refineRExportStatus = (
     const name = typeof node.properties.name === 'string' ? node.properties.name : '';
     if (!name) return;
 
-    if (nsInfo.namedExports.has(name)) return; // explicit export — keep public
+    // NAMESPACE writes the symbol (`export(`%+%`)`); the node keeps the definition's spelling.
+    const symbol = rBareName(name);
+    if (nsInfo.namedExports.has(symbol)) return; // explicit export — keep public
     // exportPatterns are precompiled linear-time matchers (see loadRPackageConfig) — no per-node recompile.
-    const matched = rExportPatternMatches(nsInfo, name);
+    const matched = rExportPatternMatches(nsInfo, symbol);
     if (matched) return;
 
     // Not in NAMESPACE → not exported.

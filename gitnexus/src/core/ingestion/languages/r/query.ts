@@ -60,7 +60,7 @@
  *
  *   - `library()`/`require()` are wildcard imports (`@import.wildcard`) —
  *     every top-level name of the named local package becomes visible,
- *     unfiltered by NAMESPACE (see `rProvider.expandsWildcardTo`).
+ *     unfiltered by NAMESPACE (see `rScopeResolver.expandsWildcardTo`).
  *     `source()` is a side-effect import (`@import.side-effect`) — it
  *     establishes a file dependency but binds no name; cross-file free
  *     calls into a `source()`d file resolve via `allowGlobalFreeCallFallback`
@@ -197,23 +197,23 @@ export const R_SCOPE_QUERY = `
               name: (identifier) @declaration.name
               value: (function_definition)) @declaration.method))))))
 
-;; R5 methods (inside setRefClass(... methods = list(...)))
-(binary_operator
-  lhs: (identifier) @_class3
-  rhs: (call
-    function: (identifier) @_refFn_m
-    (#match? @_refFn_m "^setRefClass$")
-    arguments: (arguments
-      (argument
-        name: (identifier) @_methods3
-        (#match? @_methods3 "^methods$")
-        value: (call
-          function: (identifier) @_listfn3
-          (#match? @_listfn3 "^list$")
-          arguments: (arguments
-            (argument
-              name: (identifier) @declaration.name
-              value: (function_definition)) @declaration.method))))))
+;; R5 methods (inside setRefClass(... methods = list(...))) — the call itself, assigned
+;; or not, so \`setRefClass("A", methods = list(...))\` defines them like
+;; \`A <- setRefClass(...)\`.
+(call
+  function: (identifier) @_refFn_m
+  (#match? @_refFn_m "^setRefClass$")
+  arguments: (arguments
+    (argument
+      name: (identifier) @_methods3
+      (#match? @_methods3 "^methods$")
+      value: (call
+        function: (identifier) @_listfn3
+        (#match? @_listfn3 "^list$")
+        arguments: (arguments
+          (argument
+            name: (identifier) @declaration.name
+            value: (function_definition)) @declaration.method)))))
 
 ;; Function scope on the SAME \`name = function(...)\` argument node that the
 ;; three \`@declaration.method\` patterns above anchor on, so each R6/R5 method
@@ -238,7 +238,7 @@ export const R_SCOPE_QUERY = `
       value: [(identifier) (string)] @import.source))) @import.side-effect
 
 ;; library("pkg") / require("pkg") — wildcard: every top-level name of the
-;; named local package becomes visible (rProvider.expandsWildcardTo).
+;; named local package becomes visible (rScopeResolver.expandsWildcardTo).
 (call
   function: (identifier) @_libfn
   (#match? @_libfn "^(library|require)$")

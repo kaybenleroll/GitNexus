@@ -631,10 +631,20 @@ describe('resolveRImportTarget — named imports (NAMESPACE importFrom)', () => 
 
     it('matches a backticked export() entry against the unquoted name (backticks stripped)', () => {
       const s = setup({ [F]: src }, { exports: ['`%+%`'] });
-      // Export check passes; the def keeps its backticks, so the lookup ends with no file.
-      expect(resolve(s, 'scorelib', '%+%')).toBeNull();
+      // Export check passes, and the def is found by its symbol although it keeps its backticks.
+      expect(resolve(s, 'scorelib', '%+%')).toEqual([F]);
       const t = setup({ [F]: 'g <- function(d) d' }, { exports: ['`g`'] });
       expect(resolve(t, 'scorelib', 'g')).toEqual([F]);
+    });
+
+    it('looks a name up among export entries that hold a long run of backticks in linear time', () => {
+      // `/^`+|`+$/g` took ~12 s per entry on this shape; the bound leaves a ten-fold margin.
+      const hostile = `x${'`'.repeat(200_000)}y`;
+      const s = setup({ [F]: src }, { exports: [hostile, 'f'] });
+      const start = performance.now();
+      const answers = [resolve(s, 'scorelib', 'hidden'), resolve(s, 'scorelib', 'f')];
+      expect(performance.now() - start).toBeLessThan(2_000);
+      expect(answers).toEqual([null, [F]]);
     });
 
     it('treats a package without a NAMESPACE file as exporting everything', () => {

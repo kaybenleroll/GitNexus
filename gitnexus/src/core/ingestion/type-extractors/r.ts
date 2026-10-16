@@ -7,6 +7,7 @@ import type {
 } from './types.js';
 import type { SyntaxNode } from '../utils/ast-helpers.js';
 import { getRClassNameArgument } from '../field-extractors/r.js';
+import { rBareName } from '../languages/r/bare-name.js';
 
 /**
  * R type extractor — roxygen2 annotation parsing.
@@ -86,8 +87,10 @@ const parseRoxygenParams = (block: string): RoxygenParam[] => {
     if (tag) {
       flush();
       if (tag[1] !== 'param') continue;
-      const head = /^([\w.]*\w[\w.]*)(?:[ \t]+(.*))?$/.exec(tag[2] ?? '');
-      if (!head) continue;
+      // `[\w.]+` then a word-character check, not `[\w.]*\w[\w.]*`, which backtracks
+      // quadratically on a long name that is followed by something else.
+      const head = /^([\w.]+)(?:[ \t]+(.*))?$/.exec(tag[2] ?? '');
+      if (!head || !/\w/.test(head[1])) continue;
       name = head[1];
       if (head[2]) parts.push(head[2]);
     } else if (name !== undefined && line.length > 0) {
@@ -203,7 +206,8 @@ const extractParameter: ParameterExtractor = (node: SyntaxNode, env: Map<string,
   const rhs = assignment.childForFieldName('rhs');
   if (rhs?.startIndex !== fn.startIndex || rhs.endIndex !== fn.endIndex) return;
 
-  const typeName = collectRoxygenParams(assignment).get(name.text);
+  // The tag names the symbol (`@param x`); a formal written `x` in backticks is the same one.
+  const typeName = collectRoxygenParams(assignment).get(rBareName(name.text));
   if (typeName !== undefined) env.set(name.text, typeName);
 };
 

@@ -34,6 +34,8 @@ import type { GraphNodeLookup } from '../../scope-resolution/graph-bridge/node-l
 import type { KnowledgeGraph } from '../../../graph/types.js';
 import { generateId } from '../../../../lib/utils.js';
 import { loadRPackageConfig } from './package-config.js';
+import { rBareName } from './bare-name.js';
+import { perFileSet } from '../../import-resolvers/per-file-set.js';
 import { resolveRImportTarget } from '../../import-resolvers/r.js';
 import {
   isRGlobalNameFallbackPlausible,
@@ -104,6 +106,23 @@ function emitRVirtualHeritageEdges(
 }
 
 /**
+ * `moduleScope` → its `ParsedFile`, built once per pass and keyed on the identity of the pass's
+ * `parsedFiles` array, which finalize passes unchanged to every `expandsWildcardTo` call. The
+ * lookup used to be `parsedFiles.find`, one scan of all files per `library()` edge: 450,000 edges
+ * over 3,000 files took 5.9 s. As in the C, C++ and Python providers, the first file wins on a
+ * repeated scope, as `find` did.
+ */
+const parsedFileByModuleScope = perFileSet(
+  (parsedFiles: readonly ParsedFile[]): Map<ScopeId, ParsedFile> => {
+    const index = new Map<ScopeId, ParsedFile>();
+    for (const parsed of parsedFiles) {
+      if (!index.has(parsed.moduleScope)) index.set(parsed.moduleScope, parsed);
+    }
+    return index;
+  },
+);
+
+/**
  * Enumerate all top-level names exported from a target module scope's file
  * (module-scope function and class bindings; functions nested in another function are not).
  * `library()`/`require()` are R's wildcard imports — every top-level name of
@@ -126,7 +145,7 @@ export function expandRWildcardNames(
   targetModuleScope: ScopeId,
   parsedFiles: readonly ParsedFile[],
 ): readonly string[] {
-  const target = parsedFiles.find((p) => p.moduleScope === targetModuleScope);
+  const target = parsedFileByModuleScope(parsedFiles).get(targetModuleScope);
   if (target === undefined) return [];
   const { names: topLevel, dottedTails } = rFileTopLevel(target);
   const seen = new Set<string>();
@@ -136,8 +155,9 @@ export function expandRWildcardNames(
     if (qn === undefined || qn.length === 0 || qn.includes('.')) continue; // no dotted names
     // `localDefs` is flat: it also lists functions nested in other functions, which a
     // `library()` does not bring into scope. Only module-scope bindings are top-level.
-    if (!topLevel.has(qn)) continue;
-    if (dottedTails.has(qn)) continue; // shares its tail with an S3 method: see above
+    // `topLevel` holds symbols and `qn` is the name as written, backticks included.
+    if (!topLevel.has(rBareName(qn))) continue;
+    if (dottedTails.has(qn)) continue; // shares its tail with an S3 method: see above (as written, as finalize keys it)
     if (seen.has(qn)) continue;
     seen.add(qn);
     names.push(qn);

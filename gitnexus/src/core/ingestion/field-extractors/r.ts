@@ -129,13 +129,32 @@ export class RFieldExtractor extends BaseFieldExtractor {
       const slotArgs = slotCall.childForFieldName('arguments');
       if (!slotArgs) continue;
 
+      // Only an unnamed character vector (`slots = c("a", "b")`) names its slots by
+      // their strings; elsewhere an unnamed string is not a slot (`representation("Base")`).
+      const unnamedNamesSlots =
+        paramName !== 'representation' && slotCall.childForFieldName('function')?.text === 'c';
+
       for (let j = 0; j < slotArgs.namedChildCount; j++) {
         const slot = slotArgs.namedChild(j);
         if (!slot || slot.type !== 'argument') continue;
 
         const slotName = slot.childForFieldName('name');
         const slotType = slot.childForFieldName('value');
-        if (!slotName) continue;
+        if (!slotName) {
+          const unnamed = unnamedNamesSlots ? extractQuotedTypeName(slotType) : null;
+          if (unnamed) {
+            fields.push({
+              name: unnamed,
+              type: null,
+              visibility: 'public',
+              isStatic: false,
+              isReadonly: false,
+              sourceFile: context.filePath,
+              line: slot.startPosition.row + 1,
+            });
+          }
+          continue;
+        }
 
         const typeName = extractQuotedTypeName(slotType);
 
@@ -190,6 +209,17 @@ export function findRFieldOwnerNode(node: SyntaxNode): SyntaxNode | null {
 export function getRTopLevelPropertyOwnerName(node: SyntaxNode): string | null {
   const ownerNode = findRFieldOwnerNode(node);
   if (!ownerNode) return null;
+  return getRClassNameOfOwnerNode(ownerNode);
+}
+
+/**
+ * The class name an R6 / S4 / RefClass owner node declares: the binding name of
+ * `Foo <- R6Class(...)`, or the `Class` argument of `setClass(...)` /
+ * `setRefClass(...)`. Null when `ownerNode` is not such a node. Looks at this node
+ * only (no ancestor walk), so a caller visiting every ancestor stays linear.
+ */
+export function getRClassNameOfOwnerNode(ownerNode: SyntaxNode): string | null {
+  if (!isR6Class(ownerNode) && !isS4Class(ownerNode)) return null;
 
   if (ownerNode.type === 'binary_operator') {
     return ownerNode.childForFieldName('lhs')?.text ?? null;
@@ -239,18 +269,23 @@ function inferR6FieldType(valueNode: SyntaxNode | null): string | null {
       return 'integer';
     case 'string':
       return 'character';
+    case 'na':
+      // The grammar parses NA, NA_integer_, NA_real_, NA_character_ and NA_complex_ as `na`
+      // nodes, not identifiers. Plain NA is logical.
+      return NA_FIELD_TYPES[valueNode.text] ?? null;
     default:
-      // NA variants
-      if (valueNode.type === 'identifier') {
-        const text = valueNode.text;
-        if (text === 'NA_character_') return 'character';
-        if (text === 'NA_integer_') return 'integer';
-        if (text === 'NA_real_') return 'numeric';
-        if (text === 'NA_complex_') return 'complex';
-      }
       return null;
   }
 }
+
+/** The type of each NA constant, by its spelling. */
+const NA_FIELD_TYPES: Readonly<Record<string, string>> = Object.assign(Object.create(null), {
+  NA: 'logical',
+  NA_integer_: 'integer',
+  NA_real_: 'numeric',
+  NA_character_: 'character',
+  NA_complex_: 'complex',
+});
 
 function extractQuotedTypeName(node: SyntaxNode | null): string | null {
   if (!node || node.type !== 'string') return null;

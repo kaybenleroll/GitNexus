@@ -8,6 +8,7 @@ import type { SuffixIndex } from './utils.js';
 import { suffixResolve } from './utils.js';
 import type { ParsedFile } from 'gitnexus-shared';
 import { rExportPatternMatches, type RPackageConfig } from '../languages/r/package-config.js';
+import { rBareName } from '../languages/r/bare-name.js';
 import {
   rFileTopLevel,
   rPackageDirForFile,
@@ -106,7 +107,7 @@ export function resolveRImport(
 interface RPackageDefIndex {
   /** Files of the package's `R/` directory, with what each defines at top level. */
   readonly files: ReadonlyMap<string, RFileTopLevel>;
-  /** Top-level name → files (in `parsedFiles` order) that define it. */
+  /** Top-level symbol (backticks removed) → files (in `parsedFiles` order) that define it. */
   readonly definingFiles: ReadonlyMap<string, readonly string[]>;
 }
 
@@ -152,11 +153,24 @@ function packageDefIndex(
   return byPackage.get(pkg);
 }
 
-const stripBackticks = (s: string): string => s.replace(/^`+|`+$/g, '');
+/**
+ * `s` without its leading and trailing backticks. Two scans, not `/^`+|`+$/g`: the pattern is
+ * quadratic on `x` + n backticks + `y`, and a NAMESPACE entry is repository-controlled text.
+ */
+const stripBackticks = (s: string): string => {
+  let start = 0;
+  let end = s.length;
+  while (start < end && s.charCodeAt(start) === 96) start++;
+  while (end > start && s.charCodeAt(end - 1) === 96) end--;
+  return s.slice(start, end);
+};
 
 /**
  * Resolve a NAMESPACE `importFrom(pkg, importedName)` to the `R/` file(s) of the
  * local package `pkg` that define `importedName` at top level, or `null`.
+ * `importedName` is the symbol (`%||%`) or a definition's own spelling (`` `%||%` ``): files
+ * are found by the symbol, while the dotted-tail guard below compares the spelling, because
+ * finalize indexes a definition by the text of its name as written.
  *
  * `null` (no binding, no IMPORTS edge) when: `pkg` is not a local package
  * (external packages never suffix-match anything); `importedName` is dotted
@@ -180,17 +194,18 @@ export function resolveRNamedImport(
 
   if (importedName.includes('.')) return null;
 
+  const symbol = rBareName(importedName);
   const info = rConfig.namespaceInfoByPackageDir.get(pkgDir);
   if (info !== undefined && info.hasNamespaceFile) {
     const exported =
-      info.namedExports.has(importedName) ||
-      [...info.namedExports].some((entry) => stripBackticks(entry) === importedName) ||
-      rExportPatternMatches(info, importedName);
+      info.namedExports.has(symbol) ||
+      [...info.namedExports].some((entry) => stripBackticks(entry) === symbol) ||
+      rExportPatternMatches(info, symbol);
     if (!exported) return null;
   }
 
   const index = packageDefIndex(parsedFiles, rConfig, pkg);
-  const defining = index?.definingFiles.get(importedName);
+  const defining = index?.definingFiles.get(symbol);
   if (index === undefined || defining === undefined || defining.length === 0) return null;
   if (defining.some((file) => index.files.get(file)?.dottedTails.has(importedName) === true)) {
     return null;
