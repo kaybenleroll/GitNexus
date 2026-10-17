@@ -14,7 +14,8 @@
  * Supported: literals, `.`, bracket expressions, `\d \D \w \W \s \S \b \B`, the
  * single-character escapes, `^ $`, groups (capturing and `(?:)`), alternation and the
  * quantifiers `* + ? {n} {n,} {n,m}` (lazy forms behave identically for a yes/no
- * test). Not supported, and compiled to `null`: back-references and look-around (no
+ * test). Not supported, and compiled to `null`: back-references (`\1` to `\9`, whether or not
+ * the group exists, as in TRE) and look-around (no
  * linear-time algorithm), named groups, legacy octal escapes, patterns longer than
  * {@link MAX_PATTERN_LENGTH} and patterns whose expansion exceeds {@link MAX_STATES}.
  * A syntax error also yields `null`. Matching is over UTF-16 code units, as
@@ -35,7 +36,8 @@
  * of `a...ab` each exhaust it in ~0.4 s against 50,000 distinct 100-character names.
  * Realistic patterns stay far below it: 500 alternated identifiers, anchored or not,
  * cost about 20 visits per name, because alternatives that share a prefix share
- * states. Verdicts are memoised per distinct name, so a repeated name costs one lookup.
+ * states. Verdicts are memoised per distinct name, so a repeated name costs one lookup, which is
+ * charged as one visit.
  *
  * The per-matcher cap does not bound how many matchers there are, and a NAMESPACE can
  * carry as many `exportPattern()` lines as it likes (200 hostile ones cost ~77 s). So
@@ -53,6 +55,9 @@
  * never allocated in full) and, once nothing is left, later patterns are refused without
  * being parsed (the first pattern that does not fit ends the allowance; a pattern is at most
  * {@link MAX_STATES} states, so that only happens after the allowance is nearly used up).
+ * A pattern refused after its NFA was partly built is charged for the build (see
+ * {@link REFUSED_BUILD_WORK_PER_UNIT}), and once the work budget is spent later patterns are
+ * refused without being parsed, so refused patterns cost no more than matched ones.
  * Budgets nest: a package's budget is a {@link SharedWorkBudget.child} of the
  * load's, so one package cannot take the whole load's allowance and leave every other
  * package's patterns unable to run.
@@ -69,8 +74,14 @@ export const MAX_PATTERN_LENGTH = 16384;
  */
 export const MAX_STATES = 16384;
 
-/** Deepest group nesting accepted; bounds the parser's and the builder's recursion. */
-const MAX_NESTING = 2048;
+/**
+ * Deepest group nesting accepted; bounds the parser's and the builder's recursion. It is set
+ * well inside what the call stack allows, so that the verdict does not depend on the machine:
+ * a cold process (no JIT warm-up, so the biggest frames) compiled 1,500 levels in the
+ * measurements and ran out of stack somewhere before 2,048, and 256 levels still compile on a
+ * quarter of the default stack (`node --stack-size=250`). No NAMESPACE nests groups this deep.
+ */
+export const MAX_NESTING = 256;
 
 /**
  * Most `build` calls for one pattern. States are capped separately, but a body that
@@ -124,6 +135,10 @@ export const MAX_PACKAGE_WORK = 30_000_000;
  * exceed the load's allowance on their own.
  */
 export const MAX_PACKAGE_STATES = 100_000;
+
+/** Why a pattern was refused because the work budget was spent before it was compiled. */
+const WORK_BUDGET_REASON =
+  'the work budget for this package or repository is spent (too many or too costly patterns)';
 
 /** Why a pattern was refused because the allowance of states was spent. */
 const STATE_ALLOWANCE_REASON =
@@ -205,6 +220,21 @@ export class SharedWorkBudget {
 
 /** Most distinct names whose verdict a matcher remembers. */
 const MAX_MEMO_ENTRIES = 100_000;
+
+/**
+ * Work charged for answering from a remembered verdict: one state visit, about the cost of a
+ * map lookup. Keeps a repeated name from being free, so that matchers x lookups is bounded by
+ * the budget like every other cost.
+ */
+const MEMO_HIT_WORK = 1;
+
+/**
+ * Work charged per state or build step of a pattern's NFA that was built and then refused. Building
+ * a state costs about eight state visits (85 ns against 10 ns, measured), and a refused pattern
+ * keeps no states to be counted against the allowance, so the budget would otherwise never see
+ * the time it took.
+ */
+const REFUSED_BUILD_WORK_PER_UNIT = 8;
 
 /** Thrown internally for unsupported or invalid input; never escapes this module. */
 class Reject extends Error {}
@@ -544,6 +574,9 @@ class Parser {
         // Identity escape (no named groups exist; `parseGroup` rejects those).
         return { code: 0x6b };
       default:
+        // `\1`-`\9` are back-references to R's TRE, whether or not that group exists (an
+        // absent one is an invalid regex there), so `\8` and `\9` are refused too although
+        // JavaScript's Annex B reads them as a literal digit when the pattern has fewer groups.
         if (c >= '1' && c <= '9') reject('back-reference or legacy octal escape');
         return { code: c.charCodeAt(0) };
     }
@@ -651,6 +684,11 @@ class Nfa {
   /** Character set (K_CHAR) or assertion code (K_ASSERT). */
   readonly arg: Array<CharSet | number | null> = [];
   private steps = 0;
+
+  /** States built plus build steps taken so far: what the build has cost, win or lose. */
+  get buildWork(): number {
+    return this.kind.length + this.steps;
+  }
 
   add(kind: number, out: number, out1: number, arg: CharSet | number | null): number {
     if (this.kind.length >= this.limit) reject(this.limitReason);
@@ -817,7 +855,12 @@ export class LinearRegex {
   /** True when the pattern matches anywhere in `name` (an unanchored search). */
   test(name: string): boolean {
     const known = this.verdicts.get(name);
-    if (known !== undefined) return known;
+    if (known !== undefined) {
+      // A remembered verdict is cheap but not free: a caller that asks about the same names of
+      // thousands of matchers over and over would otherwise cost time no budget counts.
+      this.charge(MEMO_HIT_WORK);
+      return known;
+    }
     if (this.work >= MAX_TOTAL_WORK || this.shared?.isSpent === true) {
       this.exhausted = true;
       return false;
@@ -1028,25 +1071,34 @@ export function compileLinearRegexDetailed(
   source: string,
   shared?: SharedWorkBudget,
 ): LinearRegexResult {
-  // With nothing left of the state allowance, refuse without even parsing the pattern.
+  // With nothing left of the state allowance, or of the work budget (which refused patterns
+  // draw on too, see below), refuse without even parsing the pattern. A matcher compiled from
+  // a spent budget would answer false for every name anyway.
   const room = shared?.statesLeft ?? MAX_STATES;
   if (room <= 0) return { regex: null, reason: STATE_ALLOWANCE_REASON };
+  if (shared?.isSpent === true) return { regex: null, reason: WORK_BUDGET_REASON };
   if (source.length > MAX_PATTERN_LENGTH) {
     return { regex: null, reason: `pattern is longer than ${MAX_PATTERN_LENGTH} characters` };
   }
+  let nfa: Nfa | undefined;
   try {
     const ast = new Parser(source).parse();
     // The build stops at the allowance, so a pattern that does not fit never has its NFA
     // allocated in full.
-    const nfa = room < MAX_STATES ? new Nfa(room, STATE_ALLOWANCE_REASON) : new Nfa();
+    nfa = room < MAX_STATES ? new Nfa(room, STATE_ALLOWANCE_REASON) : new Nfa();
     const match = nfa.add(K_MATCH, -1, -1, null);
     const start = nfa.build(ast, match);
     shared?.reserveStates(nfa.kind.length);
     return { regex: new LinearRegex(source, nfa, start, shared) };
   } catch (err) {
-    // `Reject` is the expected path; a stack overflow or any other failure also means
-    // "cannot match safely", which for an exportPattern is the same as never matching.
     if (err instanceof Reject && err.message === STATE_ALLOWANCE_REASON) shared?.closeStates(room);
+    // A refused pattern may already have built up to the whole state cap (or the build step
+    // cap) before it was refused, and a NAMESPACE can carry any number of them. Charge what it
+    // built, so that hostile refusals use up the work budget as hostile matches do, and the
+    // spent budget then refuses later patterns before they are parsed. (`Reject` is the
+    // expected path; a stack overflow or any other failure also means "cannot match safely",
+    // which for an exportPattern is the same as never matching.)
+    if (nfa !== undefined) shared?.charge(nfa.buildWork * REFUSED_BUILD_WORK_PER_UNIT);
     return {
       regex: null,
       reason: err instanceof Reject ? err.message : 'pattern could not be compiled',

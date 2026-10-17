@@ -24,10 +24,6 @@ const RESERVED = new Set(
 /** `r"(...)"`, `R'[...]'`, `r"---{...}---"`: no escapes; the body is taken as written. */
 const RAW_STRING = /^[rR](["'])(-*)(?:\(([\s\S]*)\)|\[([\s\S]*)\]|\{([\s\S]*)\})\2\1$/;
 
-/** One escape, longest form first: octal, hex/unicode, then any other `\c`. */
-const ESCAPE =
-  /\\(?:([0-7]{1,3})|(x[0-9A-Fa-f]{1,2}|u\{[0-9A-Fa-f]{1,4}\}|u[0-9A-Fa-f]{1,4}|U\{[0-9A-Fa-f]{1,8}\}|U[0-9A-Fa-f]{1,8})|([\s\S]))/g;
-
 /**
  * The value R holds for a string literal's source text, or null when it is not a
  * recognisable literal. Escapes are decoded (`"f\u006fo"` is `foo`), raw strings are
@@ -39,33 +35,53 @@ function rStringValue(text: string): string | null {
   const quote = text[0];
   if ((quote !== '"' && quote !== "'") || text.length < 2 || text[text.length - 1] !== quote)
     return null;
-  return text
-    .slice(1, -1)
-    .replace(ESCAPE, (_m, octal?: string, coded?: string, other?: string) =>
-      octal !== undefined
-        ? String.fromCharCode(parseInt(octal, 8) & 0xff)
-        : unescapeRString(`\\${coded ?? other ?? ''}`),
-    );
+  return unescapeRString(text.slice(1, -1));
 }
 
 /**
  * Generics of base R and its default packages that an S3 method name `generic.class` can register
- * against, whether or not the indexed sources define them. Not exhaustive: it covers the generics
- * a project is most likely to meet by accident, and the repository's own functions are checked
- * separately.
+ * against, whether or not the indexed sources define them: the S3 group generics (`Ops`, `Math`,
+ * `Summary`, `Complex`, `matrixOps`) and the functions each group dispatches, the `is.*` and `as.*`
+ * generics, and the common generics of base, stats, utils and graphics. Not exhaustive, and it
+ * names no other package's generics (`tidy`, `filter`, ...); the repository's own functions are
+ * checked separately.
  */
 const BASE_GENERICS: ReadonlySet<string> = new Set(
-  (
-    'print format summary plot lines points text image hist barplot boxplot pairs persp ' +
-    'as.character as.data.frame as.list as.vector as.numeric as.integer as.logical as.matrix ' +
-    'as.Date as.POSIXct as.POSIXlt as.factor as.table as.function as.environment as.double ' +
-    'length names dim dimnames levels rev sort unique duplicated anyDuplicated rep seq ' +
-    'mean median quantile range max min round diff scale cut split merge subset transform ' +
-    'with within head tail t c cbind rbind toString all.equal is.na labels str ' +
-    'update predict residuals coef fitted anova simulate terms formula family weights ' +
-    'vcov logLik AIC BIC nobs deviance confint profile model.frame row.names open close ' +
-    'by aggregate droplevels relevel reorder xtfrm solve determinant julian months weekdays'
-  ).split(' '),
+  [
+    // Group generics, and the members of the Math, Summary and Complex groups
+    'Ops Math Summary Complex matrixOps',
+    'abs sign sqrt floor ceiling trunc round signif exp log expm1 log1p cos sin tan cospi sinpi tanpi',
+    'acos asin atan cosh sinh tanh acosh asinh atanh lgamma gamma digamma trigamma',
+    'cumsum cumprod cummax cummin',
+    'all any sum prod max min range',
+    'Arg Conj Im Mod Re',
+    // is.* and as.* generics
+    'is.na is.nan is.finite is.infinite is.numeric is.array is.matrix is.unsorted is.list is.vector',
+    'is.character is.logical is.integer is.double is.complex is.function is.environment',
+    'as.character as.numeric as.integer as.logical as.double as.complex as.raw as.vector as.list',
+    'as.data.frame as.matrix as.array as.Date as.POSIXct as.POSIXlt as.difftime as.factor as.table',
+    'as.function as.environment as.name as.symbol as.call as.expression as.formula as.pairlist',
+    'as.numeric_version as.package_version as.hexmode as.octmode as.roman as.person as.personList',
+    'as.ts as.dist as.hclust as.dendrogram as.stepfun as.single',
+    // base
+    'print format summary length names dim dimnames levels rev sort rep seq unique duplicated',
+    'anyDuplicated anyNA unlist c t cbind rbind toString all.equal labels diff scale cut split',
+    'merge subset transform with within by aggregate droplevels relevel reorder xtfrm solve',
+    'determinant rowsum row.names julian months weekdays quarters units open close flush seek',
+    'truncate mean median quantile sort_by unsplit stack unstack kronecker aperm',
+    // stats
+    'update predict residuals coef fitted anova AIC BIC logLik nobs simulate terms formula family',
+    'weights vcov deviance confint profile model.frame model.matrix sigma df.residual extractAIC',
+    'add1 drop1 effects alias case.names variable.names dummy.coef proj influence rstandard',
+    'rstudent cooks.distance hatvalues dfbeta dfbetas covratio density lag window time start end',
+    'frequency cycle deltat na.omit na.exclude na.fail na.action naprint naresid napredict',
+    'biplot screeplot qqnorm termplot knots cophenetic loadings smooth qr chol',
+    // graphics and utils
+    'plot lines points text image hist barplot boxplot pairs persp head tail str',
+    'toBibtex toLatex',
+  ]
+    .join(' ')
+    .split(' '),
 );
 
 /**
@@ -224,6 +240,88 @@ function superassignedName(node: Parser.SyntaxNode): string | null {
   return target?.type === 'identifier' ? rBareName(target.text) : null;
 }
 
+/** The left-hand side of `<-`, `=`, `<<-`, or the right-hand side of `->`, `->>`; null for any other node. */
+function assignmentTarget(node: Parser.SyntaxNode): Parser.SyntaxNode | null {
+  if (node.type !== 'binary_operator') return null;
+  const operator = node.childForFieldName('operator')?.text;
+  if (operator === '<-' || operator === '=' || operator === '<<-')
+    return node.childForFieldName('lhs');
+  if (operator === '->' || operator === '->>') return node.childForFieldName('rhs');
+  return null;
+}
+
+/**
+ * Whether a call of `name` sits in the target of an assignment: `helper(z) <- 5`,
+ * `helper(z)$a <- 1`, `names(helper(z)) <- v`. R runs the replacement function `helper<-`
+ * there, not `helper`, so renaming the getter would strand the setter.
+ */
+function callsInAssignmentTarget(node: Parser.SyntaxNode, name: string): boolean {
+  const target = assignmentTarget(node);
+  // A plain name or a string names the variable being bound, not a function being called.
+  if (target === null || target.type === 'identifier' || target.type === 'string') return false;
+  for (const inner of walkNamedNodes(target)) {
+    if (inner.type === 'identifier' && isCallee(inner) && rBareName(inner.text) === name)
+      return true;
+  }
+  return false;
+}
+
+/** Whether `node` sits inside a function body or its parameter defaults. */
+function insideFunction(node: Parser.SyntaxNode): boolean {
+  for (let ancestor = node.parent; ancestor !== null; ancestor = ancestor.parent) {
+    if (ancestor.type === 'function_definition') return true;
+  }
+  return false;
+}
+
+/**
+ * Whether `node`, an identifier spelled like the new name, is used to READ a binding: a value
+ * (`sapply(x, paste)`, `x <- letters`, a default `f = assist`) or a callee. After the rename
+ * the renamed function is the global of that name, so a read that reached something else
+ * (a base or attached object, another package's function) would be captured by it. Not reads:
+ * a bound name (`assist <- 3`, a parameter, a `for` variable), an argument name (`f(assist = 1)`),
+ * a member (`x$assist`, `x@assist`) and a qualified name (`pkg::assist`).
+ */
+function readsNewName(node: Parser.SyntaxNode, newName: string): boolean {
+  const parent = node.parent;
+  if (parent === null) return true;
+  switch (parent.type) {
+    case 'argument':
+      if (parent.childForFieldName('name')?.id === node.id) return false;
+      break;
+    case 'parameter':
+      if (parent.childForFieldName('name')?.id === node.id) return false;
+      break;
+    case 'extract_operator':
+      if (parent.childForFieldName('rhs')?.id === node.id) return false;
+      break;
+    case 'namespace_operator':
+      return false;
+    case 'for_statement':
+      if (parent.childForFieldName('variable')?.id === node.id) return false;
+      break;
+    case 'binary_operator':
+      if (assignmentTarget(parent)?.id === node.id) return false;
+      break;
+  }
+  // A parameter of the enclosing function binds the name locally: a read of it, or a call of it
+  // when it can only be a function (no default), never reaches the global.
+  const local = innermostParameterKind(node, newName);
+  if (local === null) return true;
+  return isCallee(node) && local !== 'function';
+}
+
+/**
+ * A name R also writes between its operands: an infix function (`%+%`, `%in%`) or an operator
+ * (`+`, `[[`). Its uses are operator tokens, not `identifier` nodes, so a rename would edit the
+ * definition and leave every `a %+% b` calling a function that no longer exists.
+ */
+function isOperatorName(name: string): boolean {
+  return /^%.*%$/.test(name) || /^[^A-Za-z0-9._]+$/.test(name);
+}
+
+const collision = (message: string): RenameIssue => ({ code: 'name_collision', message });
+
 const unsupported = (message: string): RenameIssue => ({
   code: 'unsupported_occurrence',
   status: 'unsupported',
@@ -287,10 +385,24 @@ export const rRenameProvider: RenameProvider = {
     const name = rBareName(target.qualifiedName ?? '');
     if (target.type !== 'Function')
       return unsupported('Only plain R functions can be renamed; classes and members are refused.');
+    // `f(x) <- v` calls the replacement function `f<-`, so a name ending in `<-` is half of a pair
+    // whose other half is written differently.
+    if (name.endsWith('<-') || newName.endsWith('<-'))
+      return unsupported(
+        'A replacement function (`name<-`) is called as `name(x) <- value`; those calls are not renamed.',
+      );
+    if (isOperatorName(name) || isOperatorName(newName))
+      return unsupported(
+        'An infix function or operator (`%op%`, `+`) is also written between its operands; those uses are not renamed.',
+      );
+    // Only a function can be an S3 generic: an R6 or S4 class, a member or a field of the same
+    // spelling is not one, so a name like `Widget.foo` beside `Widget <- R6Class(...)` is free.
     const defined = new Set(
       [...files.values()].flatMap((source) =>
         source.parsed.localDefs.flatMap((d) =>
-          d.qualifiedName === undefined ? [] : [rBareName(d.qualifiedName)],
+          d.type !== 'Function' || d.qualifiedName === undefined
+            ? []
+            : [rBareName(d.qualifiedName)],
         ),
       ),
     );
@@ -298,9 +410,38 @@ export const rRenameProvider: RenameProvider = {
       return unsupported(
         'The new name would register an S3 method of an existing function or base generic.',
       );
+    // R keeps one global per name. A function of the new name in another file is a second
+    // definition (load order decides which survives); one in this file is the engine's check.
+    for (const [path, source] of files) {
+      if (path === target.filePath) continue;
+      if (
+        source.parsed.localDefs.some(
+          (d) =>
+            d.type === 'Function' &&
+            d.qualifiedName !== undefined &&
+            rBareName(d.qualifiedName) === newName,
+        )
+      )
+        return collision('Another file already defines a function of the new name.');
+    }
     for (const source of files.values()) {
       if (!source.tree) continue;
       for (const node of walkNamedNodes(source.tree.rootNode)) {
+        // A top-level variable of the new name (or a `<<-` to it) would be replaced by the
+        // renamed function, or would replace it, depending on which assignment runs last.
+        if (
+          (boundName(node) === newName && !insideFunction(node)) ||
+          superassignedName(node) === newName
+        )
+          return collision('The new name is already assigned as a variable at top level.');
+        if (
+          node.type === 'identifier' &&
+          rBareName(node.text) === newName &&
+          readsNewName(node, newName)
+        )
+          return collision(
+            'The new name is already read here as a value or called; the renamed function would capture it.',
+          );
         // `name <<- value` (inside a function or not) is a global re-definition that the
         // scope graph keeps as a separate declaration, so a rename would leave it behind.
         if (node.type === 'identifier' && isCallee(node) && rBareName(node.text) === name) {
@@ -311,6 +452,10 @@ export const rRenameProvider: RenameProvider = {
                 'A parameter of this name may hold a function, so this call may reach the parameter or the function being renamed.',
             };
         }
+        if (callsInAssignmentTarget(node, name))
+          return unsupported(
+            'A call of this name is the target of an assignment (`name(x) <- value`), which calls the replacement function `name<-`; a rename would strand it.',
+          );
         if (superassignedName(node) === name)
           return {
             code: 'ambiguous_reference',
@@ -319,18 +464,26 @@ export const rRenameProvider: RenameProvider = {
           };
         if (node.type !== 'string') continue;
         const value = rStringValue(node.text);
-        if (value !== null && (value === name || value === newName))
+        // `"name<-" <- function(x, value)` defines the replacement function by string.
+        if (
+          value !== null &&
+          (value === name || value === newName || value === `${name}<-` || value === `${newName}<-`)
+        )
           return unsupported(
             'A string literal spells this name; S3, S4, R6 and dynamic lookup resolve it by string.',
           );
       }
     }
-    // NAMESPACE is not an indexed source. A package function that the NAMESPACE
-    // exports (the graph keeps isExported unless it is proven private) is refused.
+    // NAMESPACE is not an indexed source, so a package function it exports (`export()`,
+    // `exportPattern()`, `S3method()`) would keep a stale entry. The rename planner's graph
+    // carries the indexed verdict: `isExported` is false only for a function that a NAMESPACE
+    // beside the package proves private, so a package without NAMESPACE, or a node with no
+    // verdict at all, is treated as exported and refused.
     const file = target.filePath;
     let exported = false;
     graph.forEachNode((node) => {
       if (
+        node.label === 'Function' &&
         node.properties.filePath === file &&
         typeof node.properties.name === 'string' &&
         rBareName(node.properties.name) === name &&
@@ -340,7 +493,7 @@ export const rRenameProvider: RenameProvider = {
     });
     if (exported && /(^|\/)R\//.test(file))
       return unsupported(
-        'A package function may have a NAMESPACE export entry that is not renamed.',
+        'A package function that NAMESPACE exports, or that the index cannot prove private, may have an export entry that is not renamed.',
       );
   },
 };

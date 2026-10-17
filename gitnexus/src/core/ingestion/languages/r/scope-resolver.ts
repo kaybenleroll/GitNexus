@@ -51,8 +51,26 @@ import { rArityCompatibility, rMergeBindings } from './simple-hooks.js';
 const VIRTUAL_CLASS_NAME = 'VIRTUAL';
 
 /**
+ * Whether `def` is declared by a call that carries the class name as a string
+ * (`setClass("A", ...)`, `setRefClass("A", ...)`): the name starts after the declaration
+ * does. `A <- R6Class(...)` starts at its name. Only the call form can write the S4
+ * sentinel `contains = "VIRTUAL"`; an R6 `inherit = VIRTUAL` yields an `inherits` reference
+ * of the same name that is an ordinary base class.
+ */
+function isDeclaredByNamingCall(def: SymbolDefinition): boolean {
+  const name = def.nameRange;
+  const declaration = def.declarationRange;
+  if (name === undefined || declaration === undefined) return false;
+  return (
+    name.startLine > declaration.startLine ||
+    (name.startLine === declaration.startLine && name.startCol > declaration.startCol)
+  );
+}
+
+/**
  * Mint the `VIRTUAL` placeholder Class node (once) and an EXTENDS edge from
- * every S4 class whose `contains=` names it. Scope is deliberately limited to
+ * every S4 class whose `contains=` names it (not an R6 class whose `inherit=` names a
+ * class called `VIRTUAL`). Scope is deliberately limited to
  * the literal string `"VIRTUAL"`: other S4 base-type sentinels (`"numeric"`,
  * `"list"`, …) are not treated as placeholder classes, which would be a
  * separate design decision.
@@ -81,7 +99,7 @@ function emitRVirtualHeritageEdges(
   for (const site of scopes.referenceSites) {
     if (site.kind !== 'inherits' || site.name !== VIRTUAL_CLASS_NAME) continue;
     const callerClass = findEnclosingClassDef(site.inScope, scopes);
-    if (callerClass === undefined) continue;
+    if (callerClass === undefined || !isDeclaredByNamingCall(callerClass)) continue;
     const callerGraphId = resolveDefGraphId(callerClass.filePath, callerClass, nodeLookup);
     if (callerGraphId === undefined || emitted.has(callerGraphId)) continue;
 
@@ -172,8 +190,11 @@ export function expandRWildcardNames(
  * such candidates so `foo(x)` cannot collide with `print.foo`.
  *
  * Applies to every candidate the hook sees, including R6/R5 members whose
- * qualified name is `Class.member`: a bare `member(x)` never reaches those
- * either.
+ * qualified name is `Class.member`. A bare `member(x)` never reaches an R6
+ * member (it is called through `self$member()` or `obj$member()`), so the
+ * refusal is right for R6. RefClass methods are different: a method calls its
+ * siblings and inherited methods by bare name, and those calls get no edge
+ * here (see "Limits" in `docs/languages/r-provider.md`).
  */
 export function rIsCallableVisibleFromCaller(ctx: {
   readonly candidate: SymbolDefinition;
@@ -204,7 +225,8 @@ export const rScopeResolver: ScopeResolver = {
   emitHeritageEdges: (graph, parsedFiles, nodeLookup, scopes) =>
     emitRVirtualHeritageEdges(graph, parsedFiles, nodeLookup, scopes),
 
-  // R has no `super`.
+  // R6's `super$method()` is not resolved: nothing binds `super` to the parent class, so there
+  // is no receiver type to walk from. Off, rather than answering a wrong parent.
   isSuperReceiver: () => false,
 
   // R's dynamic-dispatch `self$field$method()` chains and R6/S4 field access

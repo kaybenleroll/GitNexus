@@ -182,10 +182,14 @@ function parseArgs(text: string, openIdx: number): { args: string[]; end: number
   return null;
 }
 
+/** A bare directive argument R reads as a symbol: a letter or `.`, then letters, digits, `.` and `_`. */
+const BARE_NAME = /^[\p{L}.][\p{L}\p{N}._]*$/u;
+
 /**
  * Strip whitespace and one layer of surrounding quotes/backticks from a raw
  * argument. Returns `''` for empty or non-simple arguments (unterminated quote,
- * or anything that is not a single bare/quoted token) so callers can skip them.
+ * or anything that is not a single quoted token or bare symbol) so callers can skip
+ * them. A bare operator or indexing expression (`a+b`, `x[1]`) is not a symbol.
  */
 function normaliseArg(raw: string): string {
   const trimmed = raw.trim();
@@ -195,11 +199,44 @@ function normaliseArg(raw: string): string {
     if (trimmed.length < 2 || trimmed[trimmed.length - 1] !== first) return '';
     const end = skipQuoted(trimmed, 0);
     if (end !== trimmed.length) return '';
-    return trimmed.slice(1, -1).trim();
+    const inner = trimmed.slice(1, -1);
+    // A string is R-unescaped; a backticked name keeps an escaped backtick as written (see `rBareName`).
+    return (first === '`' ? inner : unescapeRString(inner)).trim();
   }
-  // Bare token: reject anything containing whitespace, quotes, or parens (e.g. `x = y`, nested calls).
-  if (/[\s"'`()=]/.test(trimmed)) return '';
-  return trimmed;
+  // Bare token: a syntactic name. Anything else (`x = y`, a nested call, an expression) is rejected.
+  return BARE_NAME.test(trimmed) ? trimmed : '';
+}
+
+/**
+ * The generic named by the first argument of `S3method()`. R >= 3.6 also accepts a generic of
+ * another package, `S3method(pkg::generic, class)` (roxygen2 writes it for
+ * `@exportS3Method pkg::generic`), whose method is still `generic.class`: the text after the
+ * last `::` or `:::` outside quotes and backticks is the generic. `''` when the argument is not
+ * a plain name, a quoted name, or a `pkg::name` pair of those.
+ */
+function s3GenericArg(raw: string): string {
+  const trimmed = raw.trim();
+  let operatorEnd = -1;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (isQuote(ch)) {
+      const end = skipQuoted(trimmed, i);
+      if (end === -1) return '';
+      i = end - 1;
+    } else if (ch === ':' && trimmed[i + 1] === ':') {
+      operatorEnd = trimmed[i + 2] === ':' ? i + 3 : i + 2;
+      i = operatorEnd - 1;
+    }
+  }
+  if (operatorEnd === -1) {
+    // A quoted generic spelled with its package: `"pkg::generic"`.
+    const name = normaliseArg(trimmed);
+    const colons = name.lastIndexOf('::');
+    return colons === -1 ? name : name.slice(colons + 2).replace(/^:/, '');
+  }
+  // Both sides must be names; the package side is only checked, never used.
+  const before = trimmed.slice(0, operatorEnd).replace(/:+$/, '');
+  return normaliseArg(before) ? normaliseArg(trimmed.slice(operatorEnd)) : '';
 }
 
 /**
@@ -420,7 +457,7 @@ function exportPatternArg(raw: string): string {
 /**
  * Extract the export directives from NAMESPACE text: `export`, `exportClasses`
  * and `exportMethods` names, `S3method(generic, class[, method])` as `method`
- * (else `generic.class`), and `exportPattern("…")` sources. Multi-line, quoted,
+ * (else `generic.class`; `pkg::generic` names the generic after the `::`), and `exportPattern("…")` sources. Multi-line, quoted,
  * backticked, commented and CRLF input is handled like {@link
  * parseRNamespaceImportFrom}. Non-simple arguments (named, nested calls) are
  * skipped. Never throws; returns empty lists for empty or garbled input.
@@ -435,7 +472,7 @@ export function parseRNamespaceExports(text: string): RNamespaceExports {
         if (pattern) exportPatterns.push(pattern);
       }
     } else if (head === 'S3method') {
-      const generic = normaliseArg(args[0] ?? '');
+      const generic = s3GenericArg(args[0] ?? '');
       const cls = normaliseArg(args[1] ?? '');
       if (generic && cls) {
         // The optional third argument names the function registered as the method;
@@ -610,6 +647,39 @@ export function rFileTopLevel(parsed: ParsedFile): RFileTopLevel {
     result = { names, dottedTails, writtenAs };
   }
   topLevelCache.set(parsed, result);
+  return result;
+}
+
+interface RDefIds {
+  /** Ids of the function and class definitions the file binds at top level. */
+  readonly topLevel: ReadonlySet<string>;
+  /** Ids of every definition the file's scope model holds, nested or not. */
+  readonly all: ReadonlySet<string>;
+}
+
+const defIdsCache = new WeakMap<ParsedFile, RDefIds>();
+
+/**
+ * The function and class definitions of `parsed` that are bound at top level: the `local`
+ * bindings of its Module scope. A function written inside another function is owned by that
+ * function's scope (and `localDefs` lists it all the same), so its id is in `all` only.
+ */
+function rDefIds(parsed: ParsedFile): RDefIds {
+  const cached = defIdsCache.get(parsed);
+  if (cached !== undefined) return cached;
+  const topLevel = new Set<string>();
+  const moduleScope = parsed.scopes.find((s) => s.id === parsed.moduleScope);
+  if (moduleScope !== undefined) {
+    for (const refs of moduleScope.bindings.values()) {
+      for (const ref of refs) {
+        if (ref.origin === 'local' && TOP_LEVEL_BINDABLE_TYPES.has(ref.def.type)) {
+          topLevel.add(ref.def.nodeId);
+        }
+      }
+    }
+  }
+  const result = { topLevel, all: new Set(parsed.localDefs.map((d) => d.nodeId)) };
+  defIdsCache.set(parsed, result);
   return result;
 }
 
@@ -843,15 +913,38 @@ export function rQualifiedDefinitionCount(
  */
 export interface RGlobalNameFallbackContext {
   readonly callerParsed: { readonly filePath: string };
-  readonly candidate: { readonly filePath: string };
+  readonly candidate: {
+    readonly filePath: string;
+    readonly nodeId?: string;
+    readonly type?: string;
+  };
+  /** Reaches the candidate's parse; absent in hand-built contexts, which read as "cannot decide". */
+  readonly parsedFileOf?: (filePath: string) => ParsedFile | undefined;
   /** Opaque `loadResolutionConfig` result; an {@link RPackageConfig} for R. */
   readonly resolutionConfig?: unknown;
   readonly site: { readonly name: string; readonly rawQualifiedName?: string };
 }
 
 /**
- * Refuse a `global-name-fallback` guess that the caller package's NAMESPACE
- * contradicts. Returns `false` (veto) only when ALL of these hold:
+ * True when the candidate is a function or class that its file's scope model holds and binds
+ * below the top level. A candidate the scope model does not hold (the semantic model's own
+ * entry for a dotted name carries a graph id, not a scope definition id) is not judged.
+ */
+function isClosureLocalCandidate(ctx: RGlobalNameFallbackContext): boolean {
+  const { candidate } = ctx;
+  if (candidate.nodeId === undefined || candidate.type === undefined) return false;
+  if (!TOP_LEVEL_BINDABLE_TYPES.has(candidate.type)) return false;
+  const parsed = ctx.parsedFileOf?.(candidate.filePath);
+  if (parsed === undefined) return false;
+  const ids = rDefIds(parsed);
+  return ids.all.has(candidate.nodeId) && !ids.topLevel.has(candidate.nodeId);
+}
+
+/**
+ * Refuse a `global-name-fallback` guess that R cannot make. Returns `false` (veto) when the
+ * candidate is a function or class bound inside another function (not at top level), or when
+ * the caller package's NAMESPACE contradicts the guess. The NAMESPACE veto applies only when
+ * ALL of these hold:
  *
  *  - the caller file lives under `<pkgDir>/R/**` of a package with a NAMESPACE
  *    that has an `importFrom(P, <site.name>)` entry (the LAST such entry over
@@ -864,7 +957,7 @@ export interface RGlobalNameFallbackContext {
  *    re-exports the name from a third package and the candidate may be the
  *    real origin (unknown per-package names = cannot decide = allow).
  *
- * Everything else — no config, caller outside a package `R/` (`tests/`,
+ * Everything else — no config, no parse of the candidate's file, caller outside a package `R/` (`tests/`,
  * `scripts/`, root `plumber.R`), no entry, candidate outside any package
  * `R/` — answers `true`, so `source()`/`library()` script flows are untouched.
  *
@@ -879,6 +972,11 @@ export interface RGlobalNameFallbackContext {
  * tokenised, so a later `import(pkg)` that R would prefer is invisible.
  */
 export function isRGlobalNameFallbackPlausible(ctx: RGlobalNameFallbackContext): boolean {
+  // A function or class bound inside another function lives in that call's frame: no other
+  // function, in this file or another, can reach it by its bare name. Only top-level
+  // definitions are candidates for a unique-name guess.
+  if (isClosureLocalCandidate(ctx)) return false;
+
   const cfg = ctx.resolutionConfig as RPackageConfig | null | undefined;
   if (
     typeof cfg !== 'object' ||

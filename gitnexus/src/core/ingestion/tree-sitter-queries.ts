@@ -15,9 +15,11 @@ import {
   ARRAY_METHOD_NOT_ANY_OF_PREDICATE,
   DEFAULT_EXPORT_IDENTIFIER_NOT_ANY_OF_PREDICATE,
 } from './ts-js-hoc-utils.js';
+import { unboundCallableQuery } from './languages/typescript/unbound-callables.js';
 
 // TypeScript queries - works with tree-sitter-typescript
 export const TYPESCRIPT_QUERIES = `
+${unboundCallableQuery('definition.function')}
 (class_declaration
   name: (type_identifier) @name) @definition.class
 
@@ -789,6 +791,7 @@ export const TYPESCRIPT_QUERIES = `
 
 // JavaScript queries - works with tree-sitter-javascript
 export const JAVASCRIPT_QUERIES = `
+${unboundCallableQuery('definition.function')}
 (class_declaration
   name: (identifier) @name) @definition.class
 
@@ -3064,10 +3067,13 @@ const R6_FIELD_VALUE = `[
   (repeat_statement) (return) (string) (subset) (subset2) (true) (unary_operator)
   (while_statement)
 ]`;
+// Every R `binary_operator` anchor below is an assignment (`operator: ["<-" "<<-" "="]`, see
+// languages/r/assignment.ts): the grammar has one node for all infix operators.
 export const R_QUERIES = `
 ; ── Functions (name <- function(...) or name = function(...)) ────────────────
 (binary_operator
   lhs: (identifier) @name
+  operator: ["<-" "<<-" "="]
   rhs: (function_definition)) @definition.function
 
 ; ── S4 Classes (setClass("ClassName", ...)) ──────────────────────────────────
@@ -3087,6 +3093,7 @@ export const R_QUERIES = `
 ; ── R6 Classes via namespace (ClassName <- R6::R6Class(...)) ─────────────────
 (binary_operator
   lhs: (identifier) @name
+  operator: ["<-" "<<-" "="]
   rhs: (call
     function: (namespace_operator
       rhs: (identifier) @_nsfn
@@ -3095,6 +3102,7 @@ export const R_QUERIES = `
 ; ── R6 Classes via bare call (ClassName <- R6Class(...)) ─────────────────────
 (binary_operator
   lhs: (identifier) @name
+  operator: ["<-" "<<-" "="]
   rhs: (call
     function: (identifier) @_r6fn
     (#match? @_r6fn "^R6Class$"))) @definition.class
@@ -3102,6 +3110,7 @@ export const R_QUERIES = `
 ; ── R6 Methods via namespace (inside public/private/active = list(...)) ─────
 (binary_operator
   lhs: (identifier) @_class
+  operator: ["<-" "<<-" "="]
   rhs: (call
     function: (namespace_operator
       rhs: (identifier) @_nsfn2
@@ -3121,6 +3130,7 @@ export const R_QUERIES = `
 ; ── R6 Methods via bare call (inside public/private/active = list(...)) ─────
 (binary_operator
   lhs: (identifier) @_class2
+  operator: ["<-" "<<-" "="]
   rhs: (call
     function: (identifier) @_r6fn2
     (#match? @_r6fn2 "^R6Class$")
@@ -3198,6 +3208,7 @@ export const R_QUERIES = `
 ; ── R6 Fields via namespace (non-function entries in public/private list()) ──
 (binary_operator
   lhs: (identifier) @_class
+  operator: ["<-" "<<-" "="]
   rhs: (call
     function: (namespace_operator
       rhs: (identifier) @_nsfn
@@ -3217,6 +3228,7 @@ export const R_QUERIES = `
 ; ── R6 Fields via bare call ──────────────────────────────────────────────────
 (binary_operator
   lhs: (identifier) @_class2
+  operator: ["<-" "<<-" "="]
   rhs: (call
     function: (identifier) @_r6fn
     (#match? @_r6fn "^R6Class$")

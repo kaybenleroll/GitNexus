@@ -1,15 +1,17 @@
 /**
  * R language provider.
  *
- * R uses wildcard import semantics — library() and source() bring
- * everything into scope (no named imports). No special call routing
- * is needed (unlike Ruby); R imports are parsed as standard import nodes.
+ * `library()` / `require()` of a local package are wildcard imports: every top-level
+ * name of the package becomes visible. `source()` binds no name; it only records a file
+ * dependency. Named imports come from NAMESPACE `importFrom()` entries, which
+ * `populateRNamespaceImports` turns into `named` imports before resolution. No special
+ * call routing is needed (unlike Ruby); `emitRScopeCaptures` (`r/captures.ts`) produces
+ * the import captures from the R scope query rather than from standard import nodes.
  */
 
 import { SupportedLanguages } from 'gitnexus-shared';
 import { defineLanguage } from '../language-provider.js';
 import { typeConfig as rTypeConfig } from '../type-extractors/r.js';
-import { rExportChecker } from '../export-detection.js';
 import { resolveRImport } from '../import-resolvers/r.js';
 import { R_QUERIES } from '../tree-sitter-queries.js';
 import { RFieldExtractor } from '../field-extractors/r.js';
@@ -184,7 +186,9 @@ export const rProvider = defineLanguage({
   astFrameworkPatterns: [],
   treeSitterQueries: R_QUERIES,
   typeConfig: rTypeConfig,
-  exportChecker: rExportChecker,
+  // Every definition is exported by default. NAMESPACE-driven export refinement lives in
+  // `rPostParse`: an `ExportChecker` has no file-path context, and NAMESPACE detection needs it.
+  exportChecker: () => true,
   importResolver: resolveRImport,
   fieldExtractor: new RFieldExtractor(),
   methodExtractor: rMethodExtractor,

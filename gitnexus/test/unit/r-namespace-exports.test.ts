@@ -43,6 +43,13 @@ describe('loadRPackageConfig -> RNamespaceInfo exports', () => {
       expect(names).toEqual(['bare', 'q1', 'q2']);
     });
 
+    it('decodes R escapes in a quoted name, but not in a backticked one', async () => {
+      const { names } = await load(
+        'export("f\\x6fo", \'ba\\162\', "q\\u{7a}")\nexport(`t\\x6fo`)\n',
+      );
+      expect(names).toEqual(['bar', 'foo', 'qz', 't\\x6fo']);
+    });
+
     it('does not export from a conditional directive', async () => {
       const { names } = await load('if (cond) export(hidden)\nexport(shown)\n');
       expect(names).toEqual(['shown']);
@@ -120,6 +127,34 @@ describe('loadRPackageConfig -> RNamespaceInfo exports', () => {
     it('keeps a two-argument S3method() as generic.class next to a three-argument one', async () => {
       const { names } = await load('S3method(print, foo)\nS3method(summary, foo, sum_foo)\n');
       expect(names).toEqual(['print.foo', 'sum_foo']);
+    });
+
+    // Delayed registration (R >= 3.6): the generic belongs to another package, the method is
+    // still `generic.class`. roxygen2 writes this for `@exportS3Method pkg::generic`.
+    it('names the method after the generic, not after pkg::generic', async () => {
+      const { names } = await load(
+        [
+          'S3method(dplyr::filter, my_df)',
+          'S3method(pillar:::pillar_shaft,my_df)',
+          'S3method(dplyr :: `mutate`, my_df)',
+          'S3method("tibble::as_tibble", my_df)',
+          'S3method(stats::sd, my_df, sd_impl)',
+        ].join('\n') + '\n',
+      );
+      expect(names).toEqual([
+        'as_tibble.my_df',
+        'filter.my_df',
+        'mutate.my_df',
+        'pillar_shaft.my_df',
+        'sd_impl',
+      ]);
+    });
+
+    it('skips an S3method() whose pkg::generic is not a pair of names', async () => {
+      const { names } = await load(
+        'S3method(::filter, a)\nS3method(dplyr::, b)\nS3method(a::b::, c)\n',
+      );
+      expect(names).toEqual([]);
     });
   });
 
