@@ -36,7 +36,7 @@ Monorepo: **CLI/MCP** (`gitnexus/`) + **browser UI** (`gitnexus-web/`).
 | `context`        | Callers, callees, processes for one symbol                                                                                     |
 | `impact`         | Blast radius (upstream/downstream) with risk summary                                                                           |
 | `detect_changes` | Map git diffs to affected symbols and processes                                                                                |
-| `rename`         | Graph-assisted multi-file rename with `dry_run` preview                                                                        |
+| `rename`         | Semantic rename: previews by default (`dry_run` omitted/true), applies with `dry_run: false` and the preview's `plan_token` |
 | `api_impact`     | Pre-change impact report for an API route handler                                                                              |
 | `trace`          | Shortest directed path between two symbols (call + class-member edges); group-aware (`repo: "@<group>"`) for cross-repo traces |
 | `route_map`      | API route → handler → consumer mappings                                                                                        |
@@ -166,7 +166,7 @@ export const myPhase: PipelinePhase<MyPhaseOutput> = {
 
 ### Where routes come from
 
-`route-extractors/` holds four independent ways a route can be discovered, all
+`route-extractors/` holds five independent ways a route can be discovered, all
 converging on the routes phase's `(method, url)` registry:
 
 | Source | Shape | Examples |
@@ -175,8 +175,9 @@ converging on the routes phase's `(method, url)` registry:
 | Single-file framework route | `isRouteFile` + worker extraction | Laravel `routes/*.php` |
 | Cross-file framework route | `discoverRootRouteFiles` + `extractRoutes` | Django `urlpatterns` |
 | AST-level route in a normal file | `extractDecoratorRoutes` | Spring, FastAPI, NestJS (`@Controller` + `@Get`/`@Post`/…; URLs are controller-relative — `setGlobalPrefix` and URI versioning live in the bootstrap file and are not applied), **JS/TS dispatch guards and static data route tables** |
+| Cross-file AST route facts | `extractRouteFacts` + `resolveRouteFacts` | Express apps/routers and their mount paths; directly proven Hono registrations |
 
-The last row is the one whose name undersells it. A route is DECLARED by a
+The AST-level route hook is the one whose name undersells it. A route is DECLARED by a
 decorator, but it can also be **inferred** from a raw `node:http` server's own
 dispatch — `if (req.method === 'GET' && pathname === '/api/x')` is a route with
 a path, a verb and a handler, and nothing else in the pipeline could see it.
@@ -198,6 +199,30 @@ That extractor is deliberately **precision-weighted**: `route_map` presents its
 output as fact, so a `startsWith` namespace test, a bare `pathname === '/'`
 without a verb, and any regex it cannot translate exactly are all dropped rather
 than guessed at. A missing route is a coverage limit; an invented one is a lie.
+Express `app.get(RegExp, handler)` registrations are likewise omitted: a regex
+matcher does not have one finite URL to use as a Route node key.
+Express `app.use(path, middleware)` does not itself create a Route node. When
+both receivers are proven Express instances, mounting a router joins the literal
+prefix to its registered paths before handler selection. Nested and repeated
+mounts, literal path arrays, and middleware arrays share this composition.
+
+Express receiver facts reuse the existing AST and `ParsedFile` lexical identities.
+They follow explicit ESM/CommonJS imports and exports through the configured
+`ScopeResolver`, including stable aliases and barrels. An object named `app` or
+`router` is not evidence; type-only imports, shadowed bindings, conflicting writes,
+and unproven factories do not establish a receiver. Directly proven Hono verb
+registrations remain supported, without applying Express mounting semantics.
+
+A standalone router retains its local paths. A known dynamic mount suppresses
+that fallback, while independently proven static mounts remain available. Cycles
+terminate, and exceeding the expansion budget omits the affected mount component
+rather than publishing a partial set of paths. Per-file facts are cached, but
+cross-file paths are recomputed each run. Group HTTP contracts use the same
+resolver and composition, including in source-only mode.
+
+Dispatch-guard inference also ignores stored `route.routePath` metadata:
+comparing a recorded route name with a literal does not prove that the request
+path is being dispatched.
 
 Two rules there need more than one comparison to decide, and are worth knowing
 about before changing either:
@@ -248,7 +273,7 @@ References: `semantic-model.ts` file-head (full write/read contract); `contract/
 
 ## Scope-Resolution Pipeline (RFC #909 Ring 3)
 
-Language-agnostic scope-resolution resolver. This is the resolution path for every language — it owns CALLS/ACCESSES/USES emission and inheritance edges. Adding a language is one interface implementation (`ScopeResolver`) plus one registration in the `SCOPE_RESOLVERS` map — no changes to shared code, no new pipeline phase. (RING4-1 #942 removed the legacy call-resolution DAG and the per-language `MIGRATED_LANGUAGES` flag, so `SCOPE_RESOLVERS` registration is all that's needed.)
+Language-agnostic scope-resolution resolver. This is the resolution path for every language — it owns CALLS/ACCESSES/USES emission and inheritance edges. Adding a language is one interface implementation (`ScopeResolver`) plus one registration in the `SCOPE_RESOLVERS` map — no new pipeline phase, and no changes to shared code unless the language needs an extension point that does not exist yet, which it adds as an optional `LanguageProvider` hook that no other language has to implement (R's `postParse` and `resolveMemberOwnerNode`, see the hook table below). (RING4-1 #942 removed the legacy call-resolution DAG and the per-language `MIGRATED_LANGUAGES` flag, so `SCOPE_RESOLVERS` registration is all that's needed.)
 
 ### Pipeline stages
 
@@ -276,9 +301,17 @@ Language-agnostic scope-resolution resolver. This is the resolution path for eve
 Orchestrator: `runScopeResolution(input, provider)` in `scope-resolution/pipeline/run.ts`.
 Pipeline phase: `scopeResolutionPhase` in `scope-resolution/pipeline/phase.ts` — iterates the registered `SCOPE_RESOLVERS` over the worker-serialized `ParsedFile`s. (Per-language `emitScopeCaptures` hooks may reuse a cached Tree via the orchestrator's `treeCache`, but in worker-pool runs that cache is empty — Trees can't cross MessageChannels — so they consume the pre-extracted `ParsedFile` instead; § Performance notes.)
 
+### Semantic rename
+
+`rename` plans through the graph-backed planner in `mcp/local/rename/graph-rename.ts`; `dry_run` (omitted or `true`) stops after planning and returns a single-use `plan_token`. Public apply requires that token with `dry_run: false`, validates the captured repository, declaration inventory, stable symbol identity, source-file set, source hashes and approved physical paths, and executes exactly the captured edits without replanning. The process-local cache retains edited-file snapshots and targets, hash/target evidence for unedited semantic sources, and an immutable provider-resolution configuration value, with a 15-minute lifetime and bounded plan-count and memory budgets. Provider-owned fresh configuration hooks bypass workspace memoization; configuration semantics are checked at capability validation and once after staging, before the first installation, independently of edited-file count. Source bytes and approved targets are checked before each replacement. These cooperative-workspace checks are not an atomic filesystem snapshot. An unedited source aliasing an edited target blocks preview. In MCP read-only mode the same tool is listed preview-only and any other `dry_run` is rejected before backend dispatch (`mcp/read-only-policy.ts`). The selected graph declaration must match the current source. Each language's `LanguageProvider.rename` supplies original-source name spans, spelling rules, declaration families, and syntax-specific rewrites. Embedded and standalone providers retain their own parsing strategy; shared planning does not classify language syntax or invoke compiler/language-service APIs.
+
+The planner runs the existing scope-resolution pipeline before and after the proposed edits. An opt-in source-binding observer records the declaration selected for a written name, separately from runtime dispatch expansion. Provider capture metadata travels with each parsed file, so both passes retain ordinary import and ownership evidence. Provider-proven declaration families use the existing inheritance, implementation, and declaration relationships. Re-resolution checks edited references, untouched bindings, collisions, and changes in those families.
+
+Application validates all captured source snapshots before each per-file replacement, then rechecks that destination immediately before installing it. Validation and replacement are separate filesystem operations; the operation is neither an atomic compare-and-swap nor a multi-file transaction. Unsupported or ambiguous source constructs produce an explicit blocked result. Coverage is limited to the indexed workspace and the provider's available semantic evidence; dynamic names and external consumers are not silently treated as resolved.
+
 ### Callable-value flow
 
-First-class callable values use a language-neutral inclusion analysis in `passes/callable-value-flow.ts`. Providers recognize their own syntax and emit JSON-safe `CallableFlowSite` facts (`seed`, `copy`, `alias`, `address`, `load`, `store`, `formal`, `argument`, and `invoke`) into `ParsedFile`; shared ingestion never branches on a language name. These always-on facts cross workers and the durable parse store, whose schema is bumped whenever their semantic shape changes.
+First-class callable values use a language-neutral inclusion analysis in `passes/callable-value-flow.ts`. Providers recognize their own syntax and emit JSON-safe `CallableFlowSite` facts (`seed`, `copy`, `alias`, `address`, `load`, `store`, `formal`, `argument`, and `invoke`) into `ParsedFile`; shared ingestion never branches on a language name. These always-on facts cross workers and the durable parse store. Changes to their producers or shared contracts automatically change the base parser identity used by both caches.
 
 The emit stage defers only invocation sites proven to reference a flow cell. Ordinary receiver/free/reference passes still resolve direct callees first and record exact callee IDs by file/line/column. Property dispatch then runs before callable flow because a property-dispatched wrapper call can seed actual-to-formal propagation. The callable solver consumes those direct targets, propagates callable sets through lexical cells and formals, and emits `CALLS` at the real indirect invocation site with reason `callable-value-flow` (confidence 0.8 for a singleton, 0.7 for a bounded multi-target set).
 
@@ -298,13 +331,15 @@ Standalone (regex-based) providers such as COBOL participate via `ScopeResolver.
 
 A compound receiver (`svc.getUser().address.save()`) is captured as a compact string on `ReferenceSite.receiverChain`. `utils/receiver-chain-codec.ts` is the ONE encoder/decoder — capture emitters, the scope-resolution fold, and the durable ParsedFile store all import it rather than hand-rolling the format.
 
-Wire format is **v2**: `2|<base>|<step>|<step>…`, one-character version prefix, then base-first steps, each a one-character kind sigil plus the member name (`c` = call, `f` = field). `a` (await) and `i` (index) are **name-free** and encode as a bare sigil — an awaited call's name already lives on its `c` step, and a subscript key is a value, not a lookup-able identifier. The version went 1 → 2 when those two kinds were added, and a decoder REFUSES a foreign version rather than decoding the prefix it understands: a chain missing its await/index hop decodes cleanly as a different, shorter chain and would type the receiver against the wrong member. The format is unescaped (`|` and `~` cannot occur in an identifier), so an unencodable name is refused rather than escaped, and the payload is capped at `MAX_RECEIVER_CHAIN_BYTES` / `MAX_CHAIN_DEPTH` steps. Because these strings live in the incremental parse cache and the durable ParsedFile store, a format change requires a `PARSE_CACHE_VERSION` schema bump — a stale cache would otherwise replay v1 chains this build discards.
+Wire format is **v2**: `2|<base>|<step>|<step>…`, one-character version prefix, then base-first steps, each a one-character kind sigil plus the member name (`c` = call, `f` = field). `a` (await) and `i` (index) are **name-free** and encode as a bare sigil — an awaited call's name already lives on its `c` step, and a subscript key is a value, not a lookup-able identifier. The version went 1 → 2 when those two kinds were added, and a decoder REFUSES a foreign version rather than decoding the prefix it understands: a chain missing its await/index hop decodes cleanly as a different, shorter chain and would type the receiver against the wrong member. The format is unescaped (`|` and `~` cannot occur in an identifier), so an unencodable name is refused rather than escaped, and the payload is capped at `MAX_RECEIVER_CHAIN_BYTES` / `MAX_CHAIN_DEPTH` steps. These strings live in both parse stores. Codec and capture changes automatically invalidate their caches through the base parser identity; the explicit receiver-chain wire version and foreign-version rejection still govern decoding.
 
 Receivers the resolver could not type are not silently dropped. Each records a `ResolutionOutcome` (`scope-resolution/resolution-outcome.ts`) carrying the receiver's *shape* (`classifyReceiverShape`: `chain-call` / `chain-field` / `chain-mixed` / `chain-unwrap` / `no-chain` — the bench censuses these) and its *origin* (`in-program` / `external` / `unknown`). `scope-resolution/unresolved-receivers.ts` aggregates them per member name into the index-persisted `unresolvedReceiverMembers` summary, keeping in-program and external counts under separate keys. Only in-program drops make a count short: an external-rooted call (`System.out.println`, `fetch(...)`) has no in-graph node an edge could have reached, so it is reported but does not hedge. `impact` / `context` read that summary and publish `epistemic: 'exact' | 'lower-bound'`, prose `boundaries`, and the machine-readable `causes` split (`EpistemicCauses` in `mcp/local/local-backend.ts`).
 
 ### Optional CFG/PDG emission (`--pdg`, #2081–#2086)
 
-On a `--pdg` run the parse worker builds a per-function control-flow graph from the tree-sitter AST (`LanguageProvider.cfgVisitor`; TypeScript/JavaScript today) and serializes it onto `ParsedFile.cfgSideChannel` as plain data. Scope-resolution then emits the program-dependence layers from that side-channel **inside Phase 4 of `runScopeResolution`, while the disk-backed ParsedFile store is still live** — the only window where the worker-built CFGs are loaded (the store is cleared right after the phase returns). A standalone post-`mro` phase would read an empty store, so the emit deliberately lives in-phase, mirroring the `applyCaptureSideChannel` pattern. The opt-in is off by default (graph byte-identical), folded into the parse-cache key (a pdg-off warm cache is never reused on a `--pdg` run), and each layer is bounded by a per-function edge cap that logs any dropped edges. All layers are `BasicBlock → BasicBlock` edges in the single `CodeRelation` table, keyed by `type`; there is **no** `Function → BasicBlock` edge — the symbol↔block join is reconstructed from the BasicBlock id prefix + line span. The layers build on each other:
+On a `--pdg` run providers build control-flow graphs through `LanguageProvider.cfgVisitor` (Tree-sitter ASTs) or `collectSourceCfgs` (standalone source processing). Every supported language supplies one of these hooks; Vue covers executable scripts. AST visitors run in the parse worker, while source-backed providers run during fresh scope extraction. Both produce plain `ParsedFile.cfgSideChannel` data. Scope-resolution emits the program-dependence layers **inside Phase 4 of `runScopeResolution`, while the disk-backed ParsedFile store is still live**. The store is cleared after that phase, so a later standalone phase cannot consume it.
+
+The opt-in is off by default, folded into the parse-cache key, and bounded by executable-region and edge caps. Providers report unsupported regions and cap drops instead of fabricating complete flow. All dependence edges remain `BasicBlock → BasicBlock` in the existing `CodeRelation` table. Ordinary function ownership uses the BasicBlock id prefix and source span. A provider may supply an exact graph `ownerId` for a larger executable region; COBOL uses its existing program Module identity so paragraph fallthrough and PERFORM return continuations remain inside one region. This identity is persisted on BasicBlocks and used by PDG symbol projection. No new function-to-block relation is introduced. The layers build on each other:
 
 - **M1 — CFG** (#2081): `BasicBlock` nodes + `CFG` edges. Edge _kind_ (`seq`/`cond-true`/`loop-back`/…) rides the `reason` column (CFG is one `CodeRelation` type, not one per kind).
 - **M2 — REACHING_DEF** (#2082): GEN/KILL def→use data dependence from a pure fixpoint solver; the variable name rides `reason`.
@@ -377,7 +412,7 @@ CI auto-discovers the set via `tsx`. No workflow edit required.
 
 ## Language-agnostic graph feeding
 
-18 languages → single unified graph. Four abstraction layers:
+19 languages → single unified graph. Four abstraction layers:
 
 ```
  Unified Graph Schema (44 node types, 21 relationship types)
@@ -404,8 +439,10 @@ Each language implements `LanguageProvider` (`language-provider.ts`). Key fields
 | `mroStrategy`          | `first-wins` / `c3` / `none`                                                                                                                                                                                                                                                                                                      |
 | `descriptionExtractor` | Optional hook returning a symbol's doc-comment text as its `description`; feeds the embedding metadata header so doc-only terms are semantically searchable (issue #2270). Most languages register `createLeadingDocDescriptionExtractor` (shared, language-neutral; per-language comment/wrapper config passed at the call site) |
 | `definitionPropertiesExtractor` | Optional language-owned hook for structured, clone-safe definition metadata. Shared ingestion persists these properties opaquely; the owning provider supplies the extraction semantics. |
+| `postParse` | Optional. Whole-graph pass a language runs once after every chunk is merged and before scope resolution (deferred owner resolution, manifest-driven export refinement). Called once per analyze, awaited, only when the language has parsed files; a throw aborts the parse phase. R: deferred `setMethod`/R6 owners + NAMESPACE exports. |
+| `resolveMemberOwnerNode` | Optional. For languages whose members are owned by a call/assignment rather than an enclosing container node (R: R6/RefClass): returns the node the method and field extractors read members from, or null. Consulted by the enclosing-owner slot after the container walk and `resolveFileTypeOwner` (same slot; Zig file-owner is the precedent). Not an S4 mechanism: R's `setMethod(...)` returns null (its owner is a string-literal class name, not a node); S4 ownership arrives only through the `ownerNameHint` → `postParse` path. |
 
-18 providers in `languages/index.ts` via `satisfies Record<SupportedLanguages, LanguageProvider>` — missing a language is a compile error.
+19 providers in `languages/index.ts` via `satisfies Record<SupportedLanguages, LanguageProvider>` — missing a language is a compile error.
 
 ### Unified capture tags
 
@@ -515,6 +552,60 @@ the read-only open is retried — see `sidecar-recovery.ts`
 
 Managed by `repo-manager.ts`.
 
+### Automatic parse-cache identity
+
+`core/parse-cache-identity.ts` derives full SHA-256 base and PDG identities
+from sorted, framed logical paths and raw artifact bytes. It needs no Git
+history, branch name, timestamp, network access, or contributor-assigned
+semantic version. The boundary is intentionally conservative:
+
+| Component                | Owned inputs                                                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Base                     | `core/ingestion/**` except the PDG-only paths below, `core/tree-sitter/**`, `lib/**`, `core/graph/**`, and the audited support/storage files listed in `PARSE_CACHE_BASE_FILES` |
+| PDG                      | `core/ingestion/cfg/**` and the classified COBOL extraction helpers `languages/cobol/flow.ts` and `flow-harvest.ts`; the shared COBOL tokenizer remains in base                 |
+| Runtime and dependencies | The actual selected worker, shared source/compiled runtime or packaged `dist/_shared`, grammar/parser/native/loader dependency closure, and effective runtime/loader options    |
+
+Source execution covers both source inputs and the compiled worker when that
+is the selected entry. Editing source invalidates identity immediately; it
+does not compile that worker. Run `npm run build` before expecting changed
+worker facts. Installed packages derive identity from their shipped runtime
+without requiring source, Git metadata, or a development compiler. Native
+binary bytes and loader fallback candidates are covered even when package
+versions stay the same. Unsupported resolution modes such as
+`--preserve-symlinks` cannot be verified and disable persistent cache reuse.
+
+Raw bytes mean comments and formatting inside owned roots can invalidate
+reuse. Repository documentation, UI, unrelated CLI files, and unrelated
+dependencies do not change this parser identity; broader analyzer freshness
+rules still apply. New files inside an owned root are included automatically.
+Inputs outside that boundary require an ownership decision and an update to
+`test/unit/parse-cache-input-coverage.test.ts`, which audits imports, dynamic
+loaders, runtime assets, and shared dependencies.
+
+Both the worker-result index and durable `ParsedFile` index validate the base
+identity before workers can be skipped. Physical chunk keys bind that identity
+and sorted source path/content hashes; PDG-enabled chunks additionally bind
+the PDG identity and resolved function-line cap. A CFG-only change therefore
+does not invalidate ordinary chunks. Legacy numeric, missing, malformed, or
+foreign identities miss; a concurrently pruned shard is also a miss.
+
+`RepoMeta.parseCacheIdentity` records the effective parser identity for
+unchanged-analysis and shared-current adoption checks. Analysis resolves it
+once, stages fresh cache writes, and verifies artifacts again before
+publication. A changed build rejects publication; failed staging or build
+verification keeps the published cache pair. Cache-write failures after graph
+publication warn without rolling back the successful graph. If identity is
+unverifiable, the run uses bounded transient `ParsedFile` storage without
+persistent cache reads or writes.
+`--no-parse-cache` instead requests a cold parse and publishes its fresh cache
+generation on success. FTS-only maintenance retains the old parser receipt.
+
+These checks complement graph `SCHEMA_FINGERPRINT`, the analyzer runner
+receipt, embedding preservation, and explicit wire-format checks such as the
+V8 envelope and receiver-chain version. Benchmark semantic goldens still
+require review of changed facts and pack membership; automatic compatibility
+does not approve a new baseline.
+
 ## LadybugDB schema
 
 Defined in `lbug/schema.ts`. Separate node tables per type, single `CodeRelation` table.
@@ -563,4 +654,5 @@ Node IDs use arity suffix (`#<paramCount>`): `Method:file:Class.method#1` vs `#2
 - [GUARDRAILS.md](GUARDRAILS.md) — safety boundaries for humans and agents
 - [TESTING.md](TESTING.md) — how to run tests
 - [docs/languages/objective-c-provider.md](docs/languages/objective-c-provider.md) — Objective-C provider behavior and limits
+- [docs/languages/r-provider.md](docs/languages/r-provider.md) — R provider behavior and limits
 - `AGENTS.md` / `CLAUDE.md` — agent workflows and tool usage
