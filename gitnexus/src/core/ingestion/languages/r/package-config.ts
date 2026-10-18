@@ -97,6 +97,13 @@ export interface RNamespaceInfo {
    * is spent.
    */
   exportPatternBudget?: SharedWorkBudget;
+  /**
+   * True when the NAMESPACE reader skipped, dropped or could not read something that may hide an
+   * export (see {@link RNamespaceExports.unreadable}): a conditional export, a raw-string or
+   * multi-line argument, a malformed directive. A name absent from the export lists is then not
+   * proven private. Optional so that hand-built configs read as "nothing hidden".
+   */
+  exportsUnreadable?: boolean;
   /** `importFrom(pkg, name)` pairs in NAMESPACE file order (all entries, incl. self-imports and duplicates). */
   importFrom: readonly RNamespaceImportFromEntry[];
 }
@@ -108,25 +115,103 @@ export interface RNamespaceInfo {
  */
 export const MAX_LISTED_DROPPED_PATTERNS = 50;
 
+/** Most names remembered as matched per package, so a hostile name list cannot grow the set without bound. */
+const MAX_REMEMBERED_MATCHES = 100_000;
+
+/** Names a pattern list matched while its budget lasted (only for lists that draw on a budget). */
+const matchedWhileBudgetLasted = new WeakMap<object, Set<string>>();
+
 /**
  * True when one of the package's `exportPattern()` matchers matches `name`. Once the
- * package's work budget (or the load's) is spent it stops asking the matchers at all and
- * answers false, so the cost no longer grows as patterns x names; the patterns it did not
- * get to run are then reported by {@link reportRExportPatternProblems}.
+ * package's work budget (or the load's) is spent it stops asking the matchers, so the cost no
+ * longer grows as patterns x names. A name it matched while the budget lasted keeps that
+ * answer (one set lookup, so a duplicate-named definition does not flip from exported to
+ * private); a name it had not decided answers false, and the patterns it did not get to run are
+ * then reported by {@link reportRExportPatternProblems}.
  */
 export function rExportPatternMatches(
   info: Pick<RNamespaceInfo, 'exportPatterns' | 'exportPatternBudget'>,
   name: string,
 ): boolean {
   const budget = info.exportPatternBudget;
+  let remembered = matchedWhileBudgetLasted.get(info.exportPatterns);
   for (const pattern of info.exportPatterns) {
     if (budget?.isSpent === true) {
       budget.cutShort = true;
-      return false;
+      return remembered?.has(name) === true;
     }
-    if (pattern.test(name)) return true;
+    if (pattern.test(name)) {
+      if (budget !== undefined) {
+        if (remembered === undefined) {
+          remembered = new Set();
+          matchedWhileBudgetLasted.set(info.exportPatterns, remembered);
+        }
+        if (remembered.size < MAX_REMEMBERED_MATCHES) remembered.add(name);
+      }
+      return true;
+    }
   }
   return false;
+}
+
+/**
+ * True when the package's NAMESPACE exports `symbol`: an explicit `export()`, `exportClasses()`,
+ * `exportMethods()` or `S3method()` entry, or an `exportPattern()` match. The one test the
+ * indexer's export refinement and the rename guard both use.
+ */
+export function rNamespaceExports(
+  info: Pick<RNamespaceInfo, 'namedExports' | 'exportPatterns' | 'exportPatternBudget'>,
+  symbol: string,
+): boolean {
+  return info.namedExports.has(symbol) || rExportPatternMatches(info, symbol);
+}
+
+/**
+ * True when part of the package's `exportPattern()` entries is not in effect: a pattern that
+ * was dropped at load, or one that ran out of work budget. {@link rNamespaceExports} answers
+ * false for a name such a pattern was meant to cover, so a false answer is not proof that the
+ * name is private.
+ */
+export function rExportPatternsIncomplete(
+  info: Pick<
+    RNamespaceInfo,
+    | 'exportPatterns'
+    | 'exportPatternBudget'
+    | 'droppedExportPatterns'
+    | 'omittedDroppedExportPatterns'
+  >,
+): boolean {
+  return (
+    (info.droppedExportPatterns?.length ?? 0) > 0 ||
+    (info.omittedDroppedExportPatterns ?? 0) > 0 ||
+    info.exportPatternBudget?.isSpent === true ||
+    info.exportPatternBudget?.cutShort === true ||
+    info.exportPatterns.some((matcher) => matcher.exhausted === true)
+  );
+}
+
+/**
+ * The package config each parsed file was resolved with. The resolution pass records it
+ * (`recordRPackageConfig`, from the scope resolver's workspace hook) so that the rename guard,
+ * which receives the parsed files but not the config, can read the NAMESPACE the planner loaded
+ * from disk for this very plan rather than the export verdict persisted at index time.
+ */
+const packageConfigOfParsedFile = new WeakMap<object, RPackageConfig>();
+
+/** Record `resolutionConfig` (an {@link RPackageConfig}, if it is one) against each parsed file. */
+export function recordRPackageConfig(
+  parsedFiles: readonly object[],
+  resolutionConfig: unknown,
+): void {
+  if (typeof resolutionConfig !== 'object' || resolutionConfig === null) return;
+  const config = resolutionConfig as RPackageConfig;
+  if (!(config.namespaceInfoByPackageDir instanceof Map)) return;
+  for (const parsed of parsedFiles) packageConfigOfParsedFile.set(parsed, config);
+}
+
+/** The config recorded for `parsed`, or undefined when no resolution pass recorded one. */
+export function recordedRPackageConfig(parsed: object | undefined): RPackageConfig | undefined {
+  return parsed === undefined ? undefined : packageConfigOfParsedFile.get(parsed);
 }
 
 /** Longest pattern prefix quoted in a warning. */
@@ -320,6 +405,21 @@ export async function hidesUndiscoveredPackage(
 }
 
 /**
+ * Largest DESCRIPTION or NAMESPACE read (4 MiB). Neither is a parsed source file, so the walker's
+ * per-file cap does not apply; a real one is a few kilobytes. A larger file is treated like one
+ * that cannot be read: a DESCRIPTION leaves its package undiscovered (discovery is then marked
+ * truncated), a NAMESPACE leaves the package without NAMESPACE information (rename refuses).
+ */
+const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+
+/** Read a DESCRIPTION or NAMESPACE as UTF-8; rejects when it is larger than {@link MAX_MANIFEST_BYTES}. */
+async function readManifestFile(file: string): Promise<string> {
+  const { size } = await fs.stat(file);
+  if (size > MAX_MANIFEST_BYTES) throw new Error(`${path.basename(file)} is too large to read`);
+  return fs.readFile(file, 'utf-8');
+}
+
+/**
  * Discover the R packages of a repo. Always returns a config: a scan that finds
  * no package yields an empty {@link RPackageConfig.packages} map, and its
  * {@link RPackageConfig.truncated} flag says whether that result is complete
@@ -361,7 +461,7 @@ export async function loadRPackageConfig(repoRoot: string): Promise<RPackageConf
         if (entry.isFile() && entry.name === 'DESCRIPTION') {
           try {
             const descPath = path.join(dir, entry.name);
-            const content = await fs.readFile(descPath, 'utf-8');
+            const content = await readManifestFile(descPath);
             const pkgName = descriptionPackageName(content);
             if (pkgName !== undefined && !isInstalledPackageDescription(content)) {
               const pkgDir = path.relative(repoRoot, dir).replace(/\\/g, '/');
@@ -379,9 +479,13 @@ export async function loadRPackageConfig(repoRoot: string): Promise<RPackageConf
                 }
               }
 
-              const nsPath = path.join(dir, 'NAMESPACE');
+              // The same test as DESCRIPTION: a regular file listed by the directory read, never
+              // a symlink (which could point outside the repository).
+              const nsEntry = entries.find((candidate) => candidate.name === 'NAMESPACE');
               try {
-                const nsContent = await fs.readFile(nsPath, 'utf-8');
+                if (nsEntry === undefined || !nsEntry.isFile())
+                  throw new Error('no NAMESPACE file');
+                const nsContent = await readManifestFile(path.join(dir, 'NAMESPACE'));
                 const parsedExports = parseRNamespaceExports(nsContent);
                 const namedExports = new Set<string>(parsedExports.namedExports);
                 // POSIX classes are translated; an uncompilable pattern is skipped (never
@@ -412,6 +516,7 @@ export async function loadRPackageConfig(repoRoot: string): Promise<RPackageConf
                   droppedExportPatterns,
                   omittedDroppedExportPatterns: omittedDropped,
                   exportPatternBudget: packageBudget,
+                  exportsUnreadable: parsedExports.unreadable,
                   importFrom: parseRNamespaceImportFrom(nsContent),
                 });
               } catch {

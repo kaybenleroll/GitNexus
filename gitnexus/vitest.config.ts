@@ -92,6 +92,7 @@ export default defineConfig({
             'test/integration/lbug-pool.test.ts',
             'test/integration/lbug-pool-stability.test.ts',
             'test/integration/local-backend.test.ts',
+            'test/integration/bm25-symbol-hydration.test.ts',
             'test/integration/local-backend-calltool.test.ts',
             'test/integration/spring-aop-mcp.test.ts',
             // Native @ladybugdb/core: loads a real graph through loadGraphToLbug
@@ -114,6 +115,7 @@ export default defineConfig({
             'test/integration/class-impact-all-languages.test.ts',
             'test/integration/lbug-orphan-sidecar-recovery.test.ts',
             'test/integration/lbug-interrupted-checkpoint-recovery.test.ts',
+            'test/integration/lbug-checkpoint-accounting.test.ts',
             'test/integration/lbug-incremental-search.test.ts',
             'test/integration/lbug-readonly-init.test.ts',
             // Shared sibling store (#3352): each file runs real analyses and opens
@@ -198,6 +200,7 @@ export default defineConfig({
             'test/integration/lbug-pool.test.ts',
             'test/integration/lbug-pool-stability.test.ts',
             'test/integration/local-backend.test.ts',
+            'test/integration/bm25-symbol-hydration.test.ts',
             'test/integration/local-backend-calltool.test.ts',
             'test/integration/spring-aop-mcp.test.ts',
             'test/integration/spring-destinations-lbug.test.ts',
@@ -218,6 +221,7 @@ export default defineConfig({
             'test/integration/class-impact-all-languages.test.ts',
             'test/integration/lbug-orphan-sidecar-recovery.test.ts',
             'test/integration/lbug-interrupted-checkpoint-recovery.test.ts',
+            'test/integration/lbug-checkpoint-accounting.test.ts',
             'test/integration/lbug-incremental-search.test.ts',
             'test/integration/lbug-readonly-init.test.ts',
             'test/integration/analyze-wal-checkpoint-failure.test.ts',

@@ -7,6 +7,7 @@ import {
 } from '../../src/core/ingestion/languages/r/namespace-imports.js';
 import { loadRPackageConfig } from '../../src/core/ingestion/languages/r/package-config.js';
 import { createTempDirPool } from '../helpers/temp-dir-pool.js';
+import { fastestWithin, timeWork } from '../helpers/timing-attempts.js';
 
 // `parseRNamespaceImportFrom` is pure and package-blind: it returns every
 // `importFrom()` pair in file order. Own-package drop, last-wins and external
@@ -37,7 +38,7 @@ describe('parseRNamespaceImportFrom', () => {
     ]);
   });
 
-  it('parses a 6-line wrapped directive', () => {
+  it('parses a directive wrapped one argument per line', () => {
     const src = 'importFrom(\n  scorelib,\n  a,\n  b,\n  c,\n  d\n)\n';
     expect(parseRNamespaceImportFrom(src)).toEqual([
       { pkg: 'scorelib', name: 'a' },
@@ -45,6 +46,20 @@ describe('parseRNamespaceImportFrom', () => {
       { pkg: 'scorelib', name: 'c' },
       { pkg: 'scorelib', name: 'd' },
     ]);
+  });
+
+  it('keeps the whitespace inside a quoted or backticked name and trims the rest', () => {
+    const src = 'importFrom( pkg ,  " a " ,\t` odd fn `\t,   bare   , \'b\\t\')\n';
+    expect(parseRNamespaceImportFrom(src)).toEqual([
+      { pkg: 'pkg', name: ' a ' },
+      { pkg: 'pkg', name: ' odd fn ' },
+      { pkg: 'pkg', name: 'bare' },
+      { pkg: 'pkg', name: 'b\t' },
+    ]);
+    expect(
+      parseRNamespaceExports('export( " a " , ` odd fn `,   bare  )\nS3method(" print ", foo)\n')
+        .namedExports,
+    ).toEqual([' a ', ' odd fn ', 'bare', ' print .foo']);
   });
 
   it('accepts bare, double-quoted, single-quoted and backticked names', () => {
@@ -264,12 +279,15 @@ describe('parseRNamespaceImportFrom', () => {
     it('reads a file of unterminated `{` blocks in linear time and keeps the directive after each', () => {
       // Every `if (a) {` has no `}`: each one used to rescan the rest of the file (8.8 s here).
       const src = 'if (a) {\nexport(x)\n'.repeat(16_000); // ~300 KB
-      const start = performance.now();
-      const { namedExports } = parseRNamespaceExports(src);
-      const imports = parseRNamespaceImportFrom(src + 'importFrom(p, f)\n');
-      expect(performance.now() - start).toBeLessThan(2_000);
-      expect(namedExports).toHaveLength(16_000);
-      expect(imports).toEqual([{ pkg: 'p', name: 'f' }]);
+      const { ms, value } = fastestWithin(2_000, () =>
+        timeWork(() => () => ({
+          namedExports: parseRNamespaceExports(src).namedExports,
+          imports: parseRNamespaceImportFrom(src + 'importFrom(p, f)\n'),
+        })),
+      );
+      expect(ms).toBeLessThan(2_000);
+      expect(value.namedExports).toHaveLength(16_000);
+      expect(value.imports).toEqual([{ pkg: 'p', name: 'f' }]);
     });
 
     it('still skips a closed block, and a block that a later quote aborts, as before', () => {
@@ -434,5 +452,49 @@ describe('loadRPackageConfig -> RNamespaceInfo.importFrom', () => {
     fs.writeFileSync(path.join(root, 'NAMESPACE'), 'export(f)\n');
     const config = await loadRPackageConfig(root);
     expect(config?.namespaceInfoByPackageDir.get('')?.importFrom).toEqual([]);
+  });
+});
+
+describe('parseRNamespaceExports: what the reader could not read', () => {
+  const unreadable = (src: string): boolean => parseRNamespaceExports(src).unreadable;
+
+  it.each([
+    ['a conditional export', 'if (getRversion() >= "4.1.0") export(newfun)\n'],
+    ['an else export', 'if (a) {\n} else export(newfun)\n'],
+    ['a conditional export block', 'if (a) {\n  export(newfun)\n}\n'],
+    ['a conditional S3method', 'if (a) S3method(print, foo)\n'],
+    ['a conditional exportPattern', 'if (a) exportPattern("^x")\n'],
+    ['a raw-string export', 'export(r"(newfun)")\n'],
+    ['a raw-string exportPattern', 'exportPattern(r"(^x)")\n'],
+    ['an expression argument', 'export(paste0("a", "b"))\n'],
+    ['an unbalanced directive that swallows an export', 'export(a\n  export(newfun)\nexport(b)\n'],
+    ['an unterminated quote that swallows an export', 'export("a)\n  export(newfun)\n'],
+    ['a string that spans lines', 'export("new\nfun")\n'],
+    ['an S3method without a readable class', 'S3method(print, r"(foo)")\n'],
+    ['an S3method with a named third argument', 'S3method(print, foo, method = impl)\n'],
+  ])('flags %s', (_label, src) => {
+    expect(unreadable(src)).toBe(true);
+  });
+
+  it.each([
+    ['an empty file', ''],
+    ['comments only', '# export(x)\n'],
+    [
+      'plain directives',
+      'export(a, b)\nexportClasses(C)\nS3method(print, foo, impl)\nexportPattern("^x")\n',
+    ],
+    ['a trailing comma', 'export(a, b,)\n'],
+    ['a multi-line export', 'export(\n  a,\n  b\n)\n'],
+    ['a conditional import', 'if (a) importFrom(x, y)\nelse import(z)\n'],
+    ['a conditional block with no export', 'if (a) {\n  importFrom(x, y)\n}\n'],
+    ['a malformed import that hides no export', 'importFrom(x, y\nexport(a)\n'],
+  ])('does not flag %s', (_label, src) => {
+    expect(unreadable(src)).toBe(false);
+  });
+
+  it('keeps the exports it can read next to the flag', () => {
+    const parsed = parseRNamespaceExports('export(kept)\nif (a) export(hidden)\n');
+    expect(parsed.namedExports).toEqual(['kept']);
+    expect(parsed.unreadable).toBe(true);
   });
 });

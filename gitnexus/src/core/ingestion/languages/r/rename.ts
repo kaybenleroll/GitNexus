@@ -3,6 +3,12 @@ import type { NameClaim } from 'gitnexus-shared';
 import type { RenameIssue, RenameProvider } from '../../rename-provider.js';
 import { unescapeRString } from './export-pattern.js';
 import { rBareName } from './bare-name.js';
+import { rOwningPackageDir } from './namespace-imports.js';
+import {
+  rExportPatternsIncomplete,
+  rNamespaceExports,
+  recordedRPackageConfig,
+} from './package-config.js';
 import {
   canonicalizeRenameBindings,
   createTreeSitterRenameSource,
@@ -98,7 +104,11 @@ export function registersS3Method(newName: string, defined: ReadonlySet<string>)
   return false;
 }
 
-/** Default values that can never be a function. */
+/**
+ * Default values that can never be a function. `NULL` is not one of them: it is the usual
+ * placeholder of an optional callback (`function(x, helper = NULL) helper(x)`), so the formal
+ * may hold a function when the caller supplies one.
+ */
 const CONSTANT_DEFAULTS: ReadonlySet<string> = new Set([
   'float',
   'integer',
@@ -106,7 +116,6 @@ const CONSTANT_DEFAULTS: ReadonlySet<string> = new Set([
   'string',
   'true',
   'false',
-  'null',
   'na',
   'inf',
   'nan',
@@ -344,9 +353,57 @@ const parseNames = createTreeSitterRenameSource({
   },
 });
 
+/**
+ * Functions R itself calls by name: package load and unload hooks and the session start and end
+ * hooks. A rename would leave them defined under a name nothing calls.
+ */
+const R_HOOK_FUNCTIONS: ReadonlySet<string> = new Set([
+  '.onLoad',
+  '.onAttach',
+  '.onUnload',
+  '.onDetach',
+  '.First',
+  '.Last',
+  '.First.sys',
+  '.First.lib',
+  '.Last.lib',
+]);
+
+/**
+ * The name the engine compares a graph symbol with the scope definition of. The engine reads a
+ * definition's simple name as the text after the last `.` of its qualified name (the rule that
+ * splits an owner from a member), which turns the leading-dot name `.helper` into `helper`; for a
+ * name that is only a leading dot and one word, the simple name is the whole name. Dotted names
+ * with a dot inside (`print.foo`, `.helper.foo`) are S3-style owner-qualified names and keep the
+ * engine's reading, so they stay refused.
+ */
+function rCanonicalName(
+  name: string,
+  context?: Parameters<NonNullable<RenameProvider['canonicalName']>>[1],
+): string {
+  const bare = rBareName(name);
+  const qualified = context?.definition?.qualifiedName;
+  if (qualified === undefined) return bare;
+  const full = rBareName(qualified);
+  return /^\.[^.]+$/.test(full) && bare === full.slice(1) ? full : bare;
+}
+
 export const rRenameProvider: RenameProvider = {
-  canonicalName: rBareName,
+  canonicalName: rCanonicalName,
   validateName(name) {
+    // `...`, `..1`, `..2`, ... refer to the arguments passed down to a function; R reserves them.
+    if (name === '...' || /^\.\.[0-9]+$/.test(name))
+      return {
+        code: 'invalid_name',
+        message:
+          'Choose a valid nonreserved R identifier: `...` and `..1`, `..2`, ... are reserved.',
+      };
+    if (/[^\x00-\x7f]/.test(name))
+      return {
+        code: 'invalid_name',
+        message:
+          'Choose a valid nonreserved R identifier. New names are limited to ASCII letters, digits, `.` and `_` (conservative by design).',
+      };
     if (!/^(?:[A-Za-z]|\.(?![0-9]))[A-Za-z0-9._]*$/.test(name) || RESERVED.has(name))
       return { code: 'invalid_name', message: 'Choose a valid nonreserved R identifier.' };
   },
@@ -385,11 +442,21 @@ export const rRenameProvider: RenameProvider = {
     const name = rBareName(target.qualifiedName ?? '');
     if (target.type !== 'Function')
       return unsupported('Only plain R functions can be renamed; classes and members are refused.');
+    if (R_HOOK_FUNCTIONS.has(name))
+      return unsupported(
+        'R calls this function by name (a package or session hook); a renamed one would no longer run.',
+      );
     // `f(x) <- v` calls the replacement function `f<-`, so a name ending in `<-` is half of a pair
     // whose other half is written differently.
     if (name.endsWith('<-') || newName.endsWith('<-'))
       return unsupported(
         'A replacement function (`name<-`) is called as `name(x) <- value`; those calls are not renamed.',
+      );
+    // A name made only of non-ASCII characters (`λ`) is an identifier in a UTF-8 session, not an
+    // operator; the provider reads ASCII names only, so it says that rather than "operator".
+    if (/^[^\x00-\x7f]+$/.test(name))
+      return unsupported(
+        'Only ASCII identifiers are renamed; this name is not a supported identifier.',
       );
     if (isOperatorName(name) || isOperatorName(newName))
       return unsupported(
@@ -474,12 +541,21 @@ export const rRenameProvider: RenameProvider = {
           );
       }
     }
-    // NAMESPACE is not an indexed source, so a package function it exports (`export()`,
-    // `exportPattern()`, `S3method()`) would keep a stale entry. The rename planner's graph
-    // carries the indexed verdict: `isExported` is false only for a function that a NAMESPACE
-    // beside the package proves private, so a package without NAMESPACE, or a node with no
-    // verdict at all, is treated as exported and refused.
+    // NAMESPACE is not an indexed source, so an `export()`, `exportPattern()` or `S3method()`
+    // entry naming this function would be left behind by a rename. The persisted `isExported`
+    // is not proof of privacy: an edit of NAMESPACE alone does not re-process the unchanged
+    // `R/` files, so the flag can be stale. It is only half of the proof; the other half is the
+    // NAMESPACE the planner has just loaded from disk for this plan.
     const file = target.filePath;
+    if (!/(^|\/)R\//.test(file)) return;
+    // roxygen2 regenerates NAMESPACE from `@export*` tags on the next `document()`, so a tag on
+    // the function's block would export the new name (and drop the old one) even when the
+    // NAMESPACE on disk says private now.
+    const tree = files.get(file)?.tree;
+    if (tree && hasRoxygenExportTag(tree.rootNode, name))
+      return unsupported(
+        'A roxygen2 @export tag is attached to this function; renaming it would change the exported name when NAMESPACE is next regenerated.',
+      );
     let exported = false;
     graph.forEachNode((node) => {
       if (
@@ -491,9 +567,81 @@ export const rRenameProvider: RenameProvider = {
       )
         exported = true;
     });
-    if (exported && /(^|\/)R\//.test(file))
+    if (exported)
       return unsupported(
         'A package function that NAMESPACE exports, or that the index cannot prove private, may have an export entry that is not renamed.',
       );
+    return currentNamespaceIssue(files.get(file)?.parsed, file, name);
   },
 };
+
+/** A roxygen2 tag that adds its object to NAMESPACE: `@export`, `@exportMethod`, `@exportS3Method`, ... */
+const ROXYGEN_EXPORT_TAG = /^#'[ \t]*@export\w*(?:[ \t]|$)/;
+
+/**
+ * Whether a top-level assignment of `name` in the file carries a roxygen2 `@export*` tag: a
+ * `#'` line in the run of comments that directly precedes it (a plain `#` comment in between
+ * does not break the run, as when roxygen2 collects the block). Text only; the tags are not parsed.
+ */
+function hasRoxygenExportTag(root: Parser.SyntaxNode, name: string): boolean {
+  for (const node of walkNamedNodes(root)) {
+    if (boundName(node) !== name || insideFunction(node)) continue;
+    for (let sibling = node.previousSibling; sibling; sibling = sibling.previousSibling) {
+      if (sibling.type !== 'comment') {
+        if (sibling.isNamed) break;
+        continue;
+      }
+      if (ROXYGEN_EXPORT_TAG.test(sibling.text)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether the NAMESPACE read from disk for this plan leaves `name` (defined in `file`) private.
+ * Fail-closed: anything short of a NAMESPACE that was read, parsed completely and does not export
+ * the name is a refusal, so a stale persisted verdict cannot make a rename that strands an export
+ * go through.
+ */
+function currentNamespaceIssue(
+  parsed: object | undefined,
+  file: string,
+  name: string,
+): RenameIssue | void {
+  const config = recordedRPackageConfig(parsed);
+  if (config === undefined)
+    return {
+      code: 'incomplete_semantics',
+      status: 'unsupported',
+      message:
+        'The package NAMESPACE was not read for this rename, so the function cannot be proven private.',
+    };
+  const packageDir = rOwningPackageDir(file, config);
+  const info =
+    packageDir === undefined ? undefined : config.namespaceInfoByPackageDir.get(packageDir);
+  if (info === undefined || !info.hasNamespaceFile)
+    return {
+      code: 'incomplete_semantics',
+      status: 'unsupported',
+      message:
+        'The package has no NAMESPACE file that could be read now (it may have been removed or be unreadable), so the function cannot be proven private.',
+    };
+  if (rNamespaceExports(info, name))
+    return unsupported(
+      'The package NAMESPACE now exports this function (export(), exportPattern() or S3method()); that entry would not be renamed. Re-run analyze to refresh the index.',
+    );
+  if (rExportPatternsIncomplete(info))
+    return {
+      code: 'incomplete_semantics',
+      status: 'unsupported',
+      message:
+        'An exportPattern() of the package NAMESPACE could not be fully applied, so the function cannot be proven private.',
+    };
+  if (info.exportsUnreadable === true)
+    return {
+      code: 'incomplete_semantics',
+      status: 'unsupported',
+      message:
+        'The package NAMESPACE has an export directive the reader cannot apply (a conditional export, a raw-string or multi-line argument, or a malformed directive), so the function cannot be proven private.',
+    };
+}
