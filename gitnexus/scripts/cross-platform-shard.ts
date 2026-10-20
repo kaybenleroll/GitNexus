@@ -44,15 +44,6 @@
  * partition depend on the very machine load it is trying to protect against.
  */
 export const WINDOWS_WEIGHTS_SEC: Readonly<Record<string, number>> = {
-  // 2026-10-19 refit. Most heavy entries were set to the slowest time the file
-  // took in thirteen fork rehearsal runs of the Windows 10-shard matrix
-  // (38835354829 to 39312182981; the sum of a shard's printed per-file times
-  // tracks its vitest Duration to within a few percent), rounded. Raising only
-  // the entries below their maxima moved other work onto the same shards and
-  // made the replayed worst case worse, so entries far above their maxima were
-  // lowered too; that keeps the table total, and so the 18 minute replay
-  // ceiling in the partition test, where it was. A file that cost 90 s or more
-  // but had no entry was given one.
   // Provisional Windows estimates, not Windows measurements: these native
   // inline-handler proofs took 7.25/6.86/6.52s on Node24 Linux. Apply the
   // runner's documented ~5x slowdown and round up; keep the watchdog unchanged.
@@ -65,14 +56,14 @@ export const WINDOWS_WEIGHTS_SEC: Readonly<Record<string, number>> = {
   // Refresh underestimates from run 38697469283; Zig's higher measurement
   // comes from 38693066214. Stale weights packed too much native work ahead
   // of cli-e2e and exhausted its shard's 20-minute watchdog.
-  'test/integration/rename-provider-c.test.ts': 255,
+  'test/integration/rename-provider-c.test.ts': 202,
   'test/integration/rename-provider-cobol.test.ts': 75,
   'test/integration/rename-provider-cpp.test.ts': 250,
   'test/integration/rename-provider-csharp.test.ts': 200,
-  'test/integration/rename-provider-dart.test.ts': 362,
-  'test/integration/rename-provider-go.test.ts': 295,
-  'test/integration/rename-provider-java.test.ts': 245,
-  'test/integration/rename-provider-javascript.test.ts': 182,
+  'test/integration/rename-provider-dart.test.ts': 425,
+  'test/integration/rename-provider-go.test.ts': 221,
+  'test/integration/rename-provider-java.test.ts': 300,
+  'test/integration/rename-provider-javascript.test.ts': 225,
   'test/integration/rename-provider-kotlin.test.ts': 300,
   'test/integration/rename-provider-objective-c.test.ts': 285,
   'test/integration/rename-provider-php.test.ts': 100,
@@ -82,51 +73,46 @@ export const WINDOWS_WEIGHTS_SEC: Readonly<Record<string, number>> = {
   // old 100 s entry let this file share shard 5/10 with go and dml-gate and
   // exhaust the 20-minute watchdog. Weighted at the faster measurement, scaled by
   // 55 fixtures + the pin test over the 49 + 1 measured (6 fixtures added since).
-  // 2026-10-19 refit: 56 tests took 491 to 823.5 s over five runs (median 707);
-  // charged the maximum.
-  'test/integration/rename-provider-r.test.ts': 825,
+  'test/integration/rename-provider-r.test.ts': 695,
   'test/integration/rename-provider-ruby.test.ts': 100,
   'test/integration/rename-provider-rust.test.ts': 75,
-  'test/integration/rename-provider-swift.test.ts': 360,
-  'test/integration/rename-provider-typescript.test.ts': 557,
-  'test/integration/rename-provider-vue.test.ts': 170,
-  'test/integration/rename-provider-zig.test.ts': 213,
-  // Windows max 126 s (7 runs); was a provisional seven-case estimate.
-  'test/integration/rename-preview-plan.test.ts': 126,
-  'test/integration/mcp-index-generation.test.ts': 143,
-  'test/unit/incremental-dirty-recovery.test.ts': 115,
+  'test/integration/rename-provider-swift.test.ts': 300,
+  'test/integration/rename-provider-typescript.test.ts': 625,
+  'test/integration/rename-provider-vue.test.ts': 200,
+  'test/integration/rename-provider-zig.test.ts': 183,
+  // Provisional: seven real-indexing child cases, using the existing ~25s
+  // Windows persisted-fixture profile above. Replace with observed CI timing.
+  'test/integration/rename-preview-plan.test.ts': 175,
+  'test/integration/mcp-index-generation.test.ts': 201,
+  'test/unit/incremental-dirty-recovery.test.ts': 76,
   // Re-measured after the analyze --watch e2e landed in #3072. The previous
   // 361 s entry undercharged this suite and left shard 1 close to the watchdog.
-  'test/integration/cli-e2e.test.ts': 658,
+  'test/integration/cli-e2e.test.ts': 621,
   'test/integration/worker-pool.test.ts': 254,
-  'test/unit/incremental-vector-extension-ordering.test.ts': 145,
+  'test/unit/incremental-vector-extension-ordering.test.ts': 87,
   // Measured on Windows in run 34014266125 (#3190, 2026-09-06). These DB
   // suites landed together on shard 3: the old 180s estimate and missing
   // entries made a ~27-minute recorded load look like an ~12-minute shard.
   // Upstream speedups may reduce these figures; retaining conservative weights
   // keeps the expensive suites distributed without changing the watchdog.
-  'test/unit/incremental-index-extension-dml-gate.test.ts': 333,
+  'test/unit/incremental-index-extension-dml-gate.test.ts': 414,
   // Re-measured on windows-latest run 34815870795 after vendored-first FTS
   // rewrote the HOME-layout e2e (373s) and skills-e2e grew to 542s. The old
   // 146s/444s entries packed both onto shard 2/3 and blew the 20-minute
   // watchdog with one file still queued.
-  'test/integration/skills-e2e.test.ts': 570,
-  'test/integration/fts-extension-e2e.test.ts': 435,
+  'test/integration/skills-e2e.test.ts': 550,
+  'test/integration/fts-extension-e2e.test.ts': 380,
   'test/integration/skip-fts.test.ts': 110,
-  // Windows 17 to 98 s, median 29 s (13 runs); listed because an unlisted file
-  // is charged only the per-file floor.
-  'test/integration/incremental-method-integrity.test.ts': 92,
-  // Windows max 72 s and 105 s (7 runs each); were provisional twice-the-local
-  // estimates. These scheduling hints do not change test timeouts or pass/fail gates.
-  'test/integration/embedding-identity-integrity.test.ts': 72,
-  'test/integration/shared-store-embedding-reuse.test.ts': 105,
-  // Windows max 147 s (7 runs); was a provisional twice-the-local-run estimate.
-  'test/integration/embedding-input-isolation.test.ts': 150,
-  'test/integration/analyze-wal-checkpoint-failure.test.ts': 57,
+  // Provisional: twice the local native-suite duration, pending Windows CI.
+  // These scheduling hints do not change test timeouts or pass/fail gates.
+  'test/integration/embedding-identity-integrity.test.ts': 180,
+  'test/integration/shared-store-embedding-reuse.test.ts': 140,
+  // Provisional: twice the 88.42s local native run, pending Windows CI timing.
+  'test/integration/embedding-input-isolation.test.ts': 180,
+  'test/integration/analyze-wal-checkpoint-failure.test.ts': 86,
   // Windows run 39046807237 measured 308s before two cases reached recovery.
   // Allow the measured ~19s recovery cost for each corrected in-place case.
-  // Later runs: 356 to 501 s (7 runs, median 391), so 360 was below its median.
-  'test/unit/incremental-write-integrity.test.ts': 505,
+  'test/unit/incremental-write-integrity.test.ts': 360,
   'test/integration/cli-limit-e2e.test.ts': 75,
   'test/unit/hooks.test.ts': 26,
   'test/integration/analyze-heap-oom-e2e.test.ts': 23,

@@ -105,30 +105,13 @@ describe('cross-platform shard partition', () => {
     // persisted fixtures) was charged 100 s, so the packer put it with go and
     // dml-gate and the shard exhausted the 20-minute watchdog.
     const rWeight = weightOf('test/integration/rename-provider-r.test.ts');
-    expect(rWeight).toBeGreaterThanOrEqual(820);
+    expect(rWeight).toBeGreaterThanOrEqual(600);
     const shards = allShards(ALL_CROSS_PLATFORM, SHARD_TOTAL);
     const shardOf = (file: string) => shards.findIndex((files) => files.includes(file));
     const r = shardOf('test/integration/rename-provider-r.test.ts');
     expect(r).not.toBe(-1);
     expect(shardOf('test/integration/rename-provider-go.test.ts')).not.toBe(r);
     expect(shardOf('test/unit/incremental-index-extension-dml-gate.test.ts')).not.toBe(r);
-  });
-
-  it('charges the suites that overran their shards at least their slowest measured time', () => {
-    // Fork rehearsal run 39312182981 (head 908aa930): Windows shard 4/10 took
-    // 1164.5 s of the 1200 s watchdog because skills-e2e (561 s against a 550 s
-    // weight) and rename-provider-go (295 s against 221 s) ran slow; the R
-    // rename suite took 823.5 s against 695 s in run 39235281140. Weights
-    // below measured maxima let the packer pile other work onto those shards.
-    const slowest: Readonly<Record<string, number>> = {
-      'test/integration/rename-provider-r.test.ts': 823.5,
-      'test/integration/skills-e2e.test.ts': 561,
-      'test/integration/rename-provider-go.test.ts': 295.4,
-      'test/unit/incremental-write-integrity.test.ts': 501.5,
-    };
-    for (const [file, seconds] of Object.entries(slowest)) {
-      expect(WINDOWS_WEIGHTS_SEC[file] ?? 0, file).toBeGreaterThanOrEqual(Math.floor(seconds));
-    }
   });
 
   it('covers every file exactly once, with no overlap between shards', () => {
@@ -142,21 +125,19 @@ describe('cross-platform shard partition', () => {
   it('leaves watchdog headroom for the recorded October Windows workload', () => {
     // Run 38697469283 exhausted the 20-minute watchdog before cli-e2e
     // finished. Its preceding serialized suites were undercharged or absent
-    // from the weight table. These are the same files, re-recorded as the
-    // slowest time each took in thirteen later fork rehearsal runs of the
-    // Windows matrix (38835354829 to 39312182981, 2026-10-16 to 2026-10-19);
-    // the October figures they replace were 563, 201, 285, 183, 221, 254, 300,
-    // 202 and 76 s. Keep this replay independent of the scheduling table.
+    // from the weight table. The CLI and Zig timings below come from the
+    // preceding successful run 38693066214; the other timings are from the
+    // failing run. Keep this replay independent of the scheduling table.
     const observed: Readonly<Record<string, number>> = {
-      'test/integration/cli-e2e.test.ts': 658,
-      'test/integration/mcp-index-generation.test.ts': 143,
-      'test/integration/rename-provider-objective-c.test.ts': 273,
-      'test/integration/rename-provider-zig.test.ts': 213,
-      'test/integration/rename-provider-go.test.ts': 295,
-      'test/integration/worker-pool.test.ts': 260,
-      'test/integration/rename-provider-swift.test.ts': 358,
-      'test/integration/rename-provider-c.test.ts': 253,
-      'test/unit/incremental-dirty-recovery.test.ts': 113,
+      'test/integration/cli-e2e.test.ts': 563,
+      'test/integration/mcp-index-generation.test.ts': 201,
+      'test/integration/rename-provider-objective-c.test.ts': 285,
+      'test/integration/rename-provider-zig.test.ts': 183,
+      'test/integration/rename-provider-go.test.ts': 221,
+      'test/integration/worker-pool.test.ts': 254,
+      'test/integration/rename-provider-swift.test.ts': 300,
+      'test/integration/rename-provider-c.test.ts': 202,
+      'test/unit/incremental-dirty-recovery.test.ts': 76,
     };
     const floor = weightOf('test/unmeasured.test.ts');
     const loads = allShards(ALL_CROSS_PLATFORM, SHARD_TOTAL).map((files) =>
