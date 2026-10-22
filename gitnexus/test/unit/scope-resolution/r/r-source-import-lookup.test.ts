@@ -9,8 +9,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   resolveRImportInternal,
   resolveRImportTarget,
-} from '../../../../src/core/ingestion/import-resolvers/r.js';
-import { getWorkspaceFileIndex } from '../../../../src/core/ingestion/import-resolvers/workspace-file-index.js';
+} from '../../../../src/core/ingestion/languages/r/import-target.js';
+import { getWorkspaceFileIndex } from '../../../../src/core/ingestion/utils/workspace-file-index.js';
 
 // Raw spellings: the Windows-style duplicate of 'pkg/R/dup.R' comes FIRST, so first-wins must
 // return the backslash spelling for both lookups.
