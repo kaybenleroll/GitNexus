@@ -100,18 +100,26 @@ describe('cross-platform shard partition', () => {
     ).toEqual([]);
   });
 
-  it('keeps the R rename suite off the shards that hold the go and dml-gate suites', () => {
+  it('keeps the R rename suites off the shards that hold the go and dml-gate suites', () => {
     // Windows CI run, 2026-10-17: rename-provider-r (599-750 s measured, 49
     // persisted fixtures) was charged 100 s, so the packer put it with go and
-    // dml-gate and the shard exhausted the 20-minute watchdog.
-    const rWeight = weightOf('test/integration/rename-provider-r.test.ts');
-    expect(rWeight).toBeGreaterThanOrEqual(600);
+    // dml-gate and the shard exhausted the 20-minute watchdog. The 110 R fixtures
+    // now run as two files of 55, each charged like that 55-fixture file.
+    const halves = [
+      'test/integration/rename-provider-r.test.ts',
+      'test/integration/rename-provider-r-part2.test.ts',
+    ];
     const shards = allShards(ALL_CROSS_PLATFORM, SHARD_TOTAL);
     const shardOf = (file: string) => shards.findIndex((files) => files.includes(file));
-    const r = shardOf('test/integration/rename-provider-r.test.ts');
-    expect(r).not.toBe(-1);
-    expect(shardOf('test/integration/rename-provider-go.test.ts')).not.toBe(r);
-    expect(shardOf('test/unit/incremental-index-extension-dml-gate.test.ts')).not.toBe(r);
+    for (const half of halves) {
+      expect(weightOf(half)).toBeGreaterThanOrEqual(600);
+      const r = shardOf(half);
+      expect(r).not.toBe(-1);
+      expect(shardOf('test/integration/rename-provider-go.test.ts')).not.toBe(r);
+      expect(shardOf('test/unit/incremental-index-extension-dml-gate.test.ts')).not.toBe(r);
+    }
+    // Both halves on one shard would project past the 1200 s watchdog at 15 s/test.
+    expect(shardOf(halves[0])).not.toBe(shardOf(halves[1]));
   });
 
   it('covers every file exactly once, with no overlap between shards', () => {
@@ -143,12 +151,29 @@ describe('cross-platform shard partition', () => {
     const loads = allShards(ALL_CROSS_PLATFORM, SHARD_TOTAL).map((files) =>
       files.reduce((sum, file) => sum + Math.max(weightOf(file), (observed[file] ?? 0) + floor), 0),
     );
-    // Leave at least two minutes for hosted-runner variation. Merely
+    // Leave at least three minutes for hosted-runner variation. Merely
     // fitting under 20 minutes left the previous partition prone to timeout.
-    // The ceiling was 17 minutes until the R rename provider suite (measured
-    // ~600 s on Windows) was charged its real weight: the table total grew by
-    // ~520 s, so even a perfect ten-way split averages ~1047 s per shard.
-    expect(Math.max(...loads)).toBeLessThanOrEqual(18 * 60);
+    expect(Math.max(...loads)).toBeLessThanOrEqual(17 * 60);
+  });
+
+  it('leaves watchdog headroom for the October 23 native-suite timeout', () => {
+    // Windows run 39934695864: shard 10 timed out with Kotlin still pending.
+    // Use its completed suite times, plus the October 25 green run 40172490240
+    // for query-symbol-integrity and incremental-dirty-recovery. These measured
+    // costs must remain independent of the scheduling hints being tested.
+    const observed: Readonly<Record<string, number>> = {
+      'test/integration/rename-provider-objective-c.test.ts': 385.174,
+      'test/integration/rename-provider-csharp.test.ts': 265.99,
+      'test/integration/incremental-method-integrity.test.ts': 144.974,
+      'test/integration/fts-repair-warm-session.test.ts': 61.015,
+      'test/integration/query-symbol-integrity.test.ts': 33.892,
+      'test/unit/incremental-dirty-recovery.test.ts': 127.8,
+    };
+    const floor = weightOf('test/unmeasured.test.ts');
+    const loads = allShards(ALL_CROSS_PLATFORM, SHARD_TOTAL).map((files) =>
+      files.reduce((sum, file) => sum + Math.max(weightOf(file), (observed[file] ?? 0) + floor), 0),
+    );
+    expect(Math.max(...loads)).toBeLessThanOrEqual(17 * 60);
   });
 
   it('keeps each shard within a shard of the ideal weight', () => {

@@ -30,13 +30,16 @@ describe('rFunctionLexicalNames', () => {
     expect(namesOf('f <- function() 1')).toEqual([]);
   });
 
-  it('skips a formal with a constant default that the body never assigns', () => {
-    expect(namesOf('f <- function(a, n = 2, s = "x", b = TRUE, m = -1) 1')).toEqual(['a']);
-    // NULL is the usual placeholder of an optional callback, so that formal may hold a function.
+  it('reads every named formal, whatever its default: a default proves nothing about the argument', () => {
+    expect(namesOf('f <- function(a, n = 2, s = "x", b = TRUE, m = -1) 1')).toEqual([
+      'a',
+      'b',
+      'm',
+      'n',
+      's',
+    ]);
     expect(namesOf('f <- function(a, z = NULL) 1')).toEqual(['a', 'z']);
-    // Assigned in the body, the formal may hold a function again.
     expect(namesOf('f <- function(a, n = 2) { n <- identity; n(a) }')).toEqual(['a', 'n']);
-    // A constant-default formal that a loop also binds is a loop variable.
     expect(namesOf('f <- function(n = 2) for (n in 1:3) n')).toEqual(['n']);
   });
 
@@ -65,6 +68,75 @@ describe('rFunctionLexicalNames', () => {
   it('reads a function nested 500 deep without recursing', () => {
     const body = '{ for (i in 1) '.repeat(500) + '1' + ' }'.repeat(500);
     expect(namesOf(`f <- function(a) ${body}`)).toEqual(['a', 'i']);
+  });
+});
+
+describe('rFunctionLexicalNames: ordinary assignments', () => {
+  it('reads the target of `<-`, `=`, `->` and `->>` whose value may be a function', () => {
+    expect(namesOf('f <- function(a) { b <- identity; c = g(); h -> d; 1 ->> e; a }')).toEqual([
+      'a',
+      'b',
+      'c',
+      'd',
+    ]);
+  });
+
+  it('reads an identifier or computed value, and any complex-target assignment, as a binding', () => {
+    expect(namesOf('f <- function() { p <- q; r <- s(1); t <- if (u) v else w }')).toEqual([
+      'p',
+      'r',
+      't',
+    ]);
+  });
+
+  it('does not read a function literal (a real definition) or a constant (R skips it at a call)', () => {
+    expect(namesOf('f <- function() { a <- function(y) 1; b <- 2; c <- "s"; d <- TRUE }')).toEqual(
+      [],
+    );
+    expect(namesOf('f <- function() { a <- -1; b <- NA; c <- Inf; d <- \\(z) z }')).toEqual([]);
+  });
+
+  it('keeps NULL as a binding: it is the placeholder of an optional callback', () => {
+    expect(namesOf('f <- function() { a <- NULL }')).toEqual(['a']);
+  });
+
+  it('reads the base identifier of a complex target, never the called name', () => {
+    expect(
+      namesOf('f <- function(x) { names(y) <- v; z$a <- v; w[[1]] <- v; foo(x) <- 1 }'),
+    ).toEqual(['w', 'x', 'y', 'z']);
+  });
+
+  it('does not read a write through self as a binding of self; a plain rebinding is one', () => {
+    // An R6 method that sets a field (`self$count <- 1`) keeps self the instance: only `self <- v`
+    // replaces it. Other bases keep the rule above (`z$a <- v` binds `z`).
+    expect(
+      namesOf(
+        'f <- function(v) { self$a <- v; self[["b"]] <- v; self$c[[1]] <- v; names(self$d) <- v; self@e <- v }',
+      ),
+    ).toEqual(['v']);
+    expect(namesOf('f <- function() { self <- other() }')).toEqual(['self']);
+    expect(namesOf('f <- function() { other() -> self }')).toEqual(['self']);
+  });
+
+  it('does not read `<<-` or `->>`: they assign outward', () => {
+    expect(namesOf('f <- function() { a <<- identity; identity ->> b }')).toEqual([]);
+  });
+
+  it('is flow-insensitive: a name is read when any of its assignments is a binding', () => {
+    expect(namesOf('f <- function() { a <- 2; a <- identity; b <- identity; b <- 2 }')).toEqual([
+      'a',
+      'b',
+    ]);
+  });
+
+  it('leaves the assignments of a nested function to that function', () => {
+    expect(namesOf('f <- function(a) { h <- function(b) { c <- identity; b }; a }')).toEqual(['a']);
+  });
+
+  it('does not model assign(), delayedAssign(), list2env() or with()', () => {
+    expect(
+      namesOf('f <- function() { assign("a", identity); delayedAssign("b", g()); with(e, c) }'),
+    ).toEqual([]);
   });
 });
 

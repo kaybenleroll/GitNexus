@@ -181,6 +181,7 @@ const LBUG_NATIVE = [
   'test/integration/rename-provider-php.test.ts',
   'test/integration/rename-provider-python.test.ts',
   'test/integration/rename-provider-r.test.ts',
+  'test/integration/rename-provider-r-part2.test.ts',
   'test/integration/rename-provider-ruby.test.ts',
   'test/integration/rename-provider-rust.test.ts',
   'test/integration/rename-provider-swift.test.ts',
@@ -342,6 +343,7 @@ const WORKER_THREADS = [
   // Native callback parsing and exact caller/summary ownership (#3489).
   'test/integration/cfg/interproc-taint.test.ts',
   'test/integration/function-local-identity.test.ts',
+  'test/integration/java-imported-return-types.test.ts',
   'test/unit/community-processor.test.ts',
   'test/integration/worker-pool.test.ts',
   'test/integration/parse-impl-quarantine-cache-skip.test.ts',

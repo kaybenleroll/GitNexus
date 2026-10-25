@@ -33,10 +33,17 @@ import { resolveDefGraphId } from '../../scope-resolution/graph-bridge/ids.js';
 import type { GraphNodeLookup } from '../../scope-resolution/graph-bridge/node-lookup.js';
 import type { KnowledgeGraph } from '../../../graph/types.js';
 import { generateId } from '../../../../lib/utils.js';
-import { loadRPackageConfig, recordRPackageConfig } from './package-config.js';
+import {
+  loadRPackageConfig,
+  recordedRPackageConfig,
+  recordRPackageConfig,
+  rSymbolVisibility,
+} from './package-config.js';
 import { rBareName } from './bare-name.js';
+import { applyRCaptureSideChannel, rResolveSelfMember } from './r6-self.js';
 import { perFileSet } from '../../utils/per-file-set.js';
 import { resolveRImportTarget } from './import-target.js';
+import { collectRUnindexedSources } from './unindexed-sources.js';
 import {
   isRGlobalNameFallbackPlausible,
   populateRNamespaceImports,
@@ -141,14 +148,21 @@ const parsedFileByModuleScope = perFileSet(
 );
 
 /**
- * Enumerate all top-level names exported from a target module scope's file
- * (module-scope function and class bindings; functions nested in another function are not).
- * `library()`/`require()` are R's wildcard imports — every top-level name of
- * the named local package becomes visible, UNFILTERED by NAMESPACE (a
- * `library()`/`require()` call brings the whole package's namespace into
- * scope regardless of what NAMESPACE declares as exported — confirmed by a
- * fixture where `pkgA/NAMESPACE` does not export `ResultSet`, yet
- * `require("pkgA")` must still resolve it).
+ * Enumerate the top-level names a `library()`/`require()` of a target module scope's file brings
+ * into scope (module-scope function and class bindings; functions nested in another function are
+ * not). `library()`/`require()` are R's wildcard imports, and R attaches only a package's
+ * EXPORTS: a name is kept when the target's package has no NAMESPACE, or the NAMESPACE provably
+ * exports it (`rSymbolVisibility` is `public`). A name the NAMESPACE does not export, or may
+ * export but cannot be proven to (unreadable NAMESPACE, a dropped or cut-short
+ * `exportPattern()`), is left out: strict, because the edge this binding yields is a precise
+ * 0.85 one. A bare call of such a name is not lost to the other tiers: the 0.5 unique-name guess
+ * skips it only when it is proven private (`isRGlobalNameFallbackPlausible`).
+ *
+ * The package config is read from the target's `ParsedFile` (`recordedRPackageConfig`); without
+ * one (hand-built input) nothing is filtered. The hook has no importer, so a `library(ownpkg)`
+ * issued from inside the package loses the package's private names as well (a documented gap).
+ * This reverses the earlier `load_all()` reading ("every name visible"): see
+ * docs/languages/r-provider.md.
  *
  * A bare name is dropped when the same file also defines a dotted top-level
  * name with that tail (`foo` next to `print.foo`). The shared finalize indexes
@@ -166,6 +180,7 @@ export function expandRWildcardNames(
   const target = parsedFileByModuleScope(parsedFiles).get(targetModuleScope);
   if (target === undefined) return [];
   const { names: topLevel, dottedTails } = rFileTopLevel(target);
+  const cfg = recordedRPackageConfig(target);
   const seen = new Set<string>();
   const names: string[] = [];
   for (const def of target.localDefs) {
@@ -176,6 +191,9 @@ export function expandRWildcardNames(
     // `topLevel` holds symbols and `qn` is the name as written, backticks included.
     if (!topLevel.has(rBareName(qn))) continue;
     if (dottedTails.has(qn)) continue; // shares its tail with an S3 method: see above (as written, as finalize keys it)
+    if (cfg !== undefined && rSymbolVisibility(cfg, target.filePath, rBareName(qn)) !== 'public') {
+      continue; // not an export of the package (or not provably one)
+    }
     if (seen.has(qn)) continue;
     seen.add(qn);
     names.push(qn);
@@ -184,10 +202,14 @@ export function expandRWildcardNames(
 }
 
 /**
- * A bare R call `foo(x)` can never invoke a def whose name contains a `.`
- * (`print.foo` is only reachable as `print.foo(...)` or through S3 dispatch),
- * yet the free-call fallback's simple-name index keys it under `foo`. Refuse
- * such candidates so `foo(x)` cannot collide with `print.foo`.
+ * The free-call name fallback must not bind a bare call `foo(x)` to a def whose
+ * name contains a `.`: `print.foo` is reached as `print.foo(...)` or through S3
+ * dispatch, yet the fallback's simple-name index keys it under `foo`. Refuse
+ * such candidates so `foo(x)` cannot collide with `print.foo`. This is not a
+ * claim that a bare call never runs a dotted function: `my.helper(x)` and
+ * `read.config(x)` are ordinary calls. They skip this fallback and bind in the
+ * same file locally (0.85) or elsewhere by qualified-name lookup at 0.35
+ * (`scope-resolution: call`), which `docs/languages/r-provider.md` describes.
  *
  * Applies to every candidate the hook sees, including R6/R5 members whose
  * qualified name is `Class.member`. A bare `member(x)` never reaches an R6
@@ -209,6 +231,14 @@ export const rScopeResolver: ScopeResolver = {
 
   loadResolutionConfig: (repoPath: string) => loadRPackageConfig(repoPath),
 
+  // The rename preview reloads the config uncached (as the contract requires), and also records
+  // the repository's R files that are not indexed sources, for the rename guard (`checkSafety`
+  // refuses a name such a file uses; see `collectRUnindexedSources`).
+  refreshResolutionConfig: async (repoPath: string, filePaths: readonly string[]) => ({
+    ...(await loadRPackageConfig(repoPath)),
+    unindexedRSources: await collectRUnindexedSources(repoPath, filePaths),
+  }),
+
   resolveImportTarget: resolveRImportTarget,
 
   expandsWildcardTo: (targetModuleScope, parsedFiles) =>
@@ -225,12 +255,30 @@ export const rScopeResolver: ScopeResolver = {
   emitHeritageEdges: (graph, parsedFiles, nodeLookup, scopes) =>
     emitRVirtualHeritageEdges(graph, parsedFiles, nodeLookup, scopes),
 
+  // A typed receiver (`self$m()`, `u <- User$new(); u$m()`) reaches the public members of the
+  // class and its parents; where none defines `m` the call is unresolved, not a call of a free
+  // function `m`.
+  resolveReceiverMember: rResolveSelfMember,
+  // An R6 or RefClass generator object (`User` in `User$save()`) is not an instance: it carries
+  // `new()` and the class metadata, never the class's instance methods. So a class name is never
+  // the receiver of a member call here.
+  isBareClassReceiverCandidate: () => false,
+  // A dotted class name (`My.Class`) is read by the shared receiver pass as a qualified one, which
+  // does not walk the class's parents and lets a lexically visible free function of the member's
+  // name win. Such a receiver gets no lookup: the call is recorded as `receiver-unresolved`, which
+  // also gives up the class's own and inherited methods (R-13).
+  suppressReceiverLookup: (typeRef) => typeRef.rawName.includes('.'),
+  // Restores which R6 members are private for a file reused from a worker or the parse cache.
+  applyCaptureSideChannel: applyRCaptureSideChannel,
+
   // R6's `super$method()` is not resolved: nothing binds `super` to the parent class, so there
-  // is no receiver type to walk from. Off, rather than answering a wrong parent.
+  // is no receiver type to walk from. Off, rather than answering a wrong parent. (`self` is
+  // bound, to the enclosing class, by `emitRScopeCaptures`; `private$` is not.)
   isSuperReceiver: () => false,
 
   // R's dynamic-dispatch `self$field$method()` chains and R6/S4 field access
-  // benefit from the same heuristic Ruby/Python rely on.
+  // benefit from the same heuristic Ruby/Python rely on. It does not bear on `self$m()` itself:
+  // that is settled by the typed `self` and `resolveReceiverMember` above.
   fieldFallbackOnMethodLookup: true,
 
   // `source()` is a side-effect import (binds no name) — a cross-file free
@@ -282,7 +330,8 @@ export const rScopeResolver: ScopeResolver = {
 
   // The free-call fallback keys defs by the text after the last `.` of their
   // qualified name, so an S3 method `print.foo` sits next to a bare `foo` and
-  // makes the bare call ambiguous (no edge). A bare call can never invoke a
-  // dotted def, so drop those candidates.
+  // makes the bare call ambiguous (no edge). Drop those candidates from the
+  // name fallback; a call that spells the full dotted name binds by
+  // qualified-name lookup instead (see `rIsCallableVisibleFromCaller`).
   isCallableVisibleFromCaller: rIsCallableVisibleFromCaller,
 };

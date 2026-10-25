@@ -5,8 +5,9 @@ import type { CaptureMatch, ParsedImport, ParsedTypeBinding } from 'gitnexus-sha
  * binds no name (cross-file free calls into a `source()`d file resolve via
  * `rScopeResolver.allowGlobalFreeCallFallback` instead).
  *
- * `library()`/`require()` are wildcard imports — every top-level name of the
- * named local package becomes visible (`rScopeResolver.expandsWildcardTo`).
+ * `library()`/`require()` are wildcard imports — the exported names of the named
+ * local package (every top-level name when it has no NAMESPACE) become visible
+ * (`rScopeResolver.expandsWildcardTo`).
  *
  * `resolveRImportTarget` (`languages/r/import-target.ts`) guards on
  * `context.parsedImport.kind === 'wildcard'` specifically to refuse a
@@ -37,5 +38,10 @@ export function interpretRTypeBinding(captures: CaptureMatch): ParsedTypeBinding
   const type = captures['@type-binding.type']?.text;
   if (name === undefined || type === undefined) return null;
 
+  // `self` in an R6 method, typed as its class by `emitRScopeCaptures` (the shared `self` source,
+  // as Ruby's interpreter reads it).
+  if (captures['@type-binding.self'] !== undefined) {
+    return { boundName: name, rawTypeName: type, source: 'self' };
+  }
   return { boundName: name, rawTypeName: type, source: 'constructor-inferred' };
 }

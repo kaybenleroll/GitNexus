@@ -4,10 +4,18 @@ import path from 'path';
 import {
   parseRNamespaceExports,
   parseRNamespaceImportFrom,
+  parseRNamespaceImportPackages,
+  rFileTopLevel,
+  rOwningPackageDir,
+  rRecordSymbolVisibilityMemo,
   type RNamespaceImportFromEntry,
+  type RSymbolVisibility,
 } from './namespace-imports.js';
+import { rBareName } from './bare-name.js';
 import { compileRExportPatternDetailed, type RExportMatcher } from './export-pattern.js';
 import { SharedWorkBudget } from './linear-regex.js';
+import type { RUnindexedSource } from './unindexed-sources.js';
+import type { ParsedFile } from 'gitnexus-shared';
 import { isDev } from '../../utils/env.js';
 import { isHardcodedIgnoredDirectory } from '../../../../config/ignore-service.js';
 import { logger } from '../../../logger.js';
@@ -62,6 +70,13 @@ export interface RPackageConfig {
    * as "complete".
    */
   truncated?: boolean;
+  /**
+   * R files of the repository that are not indexed sources (skipped directories, `.Rprofile`,
+   * `R/*.S`), with the identifier tokens each contains. Set only by the rename-preview reload
+   * (`refreshResolutionConfig`), so the rename guard can refuse a name such a file uses; absent
+   * means the repository was not scanned.
+   */
+  unindexedRSources?: readonly RUnindexedSource[];
 }
 
 export interface RNamespaceInfo {
@@ -106,6 +121,41 @@ export interface RNamespaceInfo {
   exportsUnreadable?: boolean;
   /** `importFrom(pkg, name)` pairs in NAMESPACE file order (all entries, incl. self-imports and duplicates). */
   importFrom: readonly RNamespaceImportFromEntry[];
+  /**
+   * Every name an `S3method()` directive registers (bare, as {@link rBareName} spells it). A
+   * registration is not an export: it makes the method reachable through S3 dispatch only. The
+   * graph keeps such a method public (`isExported`) and `rename` refuses it, but resolution does
+   * not treat it as exported (see {@link s3RegisteredOnly}). Optional so that hand-built configs
+   * read as "no registration".
+   */
+  s3Registered?: ReadonlySet<string>;
+  /**
+   * The {@link s3Registered} names that no `export()`, `exportClasses()` or `exportMethods()`
+   * entry lists. They stay in {@link namedExports} (which records what the directives name), and
+   * {@link rNamespaceExports} answers false for them unless an `exportPattern()` matches, so
+   * `library()`, `pkg::name`, `importFrom()` and the visibility memo see real exports only.
+   * Optional, absent reads as empty.
+   */
+  s3RegisteredOnly?: ReadonlySet<string>;
+  /**
+   * Packages the NAMESPACE declares an import from other than through `importFrom()`:
+   * `import(Q)` (a named `except =` argument is skipped; the package is still imported) and the
+   * S4 forms `importClassesFrom(Q, ...)` and `importMethodsFrom(Q, ...)`. Read by the
+   * package-visibility rule of the unique-name guess. Optional, absent reads as empty.
+   */
+  importPackages?: ReadonlySet<string>;
+  /**
+   * Package names of the DESCRIPTION `Depends:` field (continuation lines included, `R` itself
+   * dropped): the packages attaching this one also attaches. Optional, absent reads as empty.
+   */
+  depends?: ReadonlySet<string>;
+  /**
+   * True when the NAMESPACE reader skipped or could not read something that may hide an import:
+   * a conditional (`if` / `else`) body or a malformed directive that names an import-family
+   * directive, or an import argument it cannot read. The imports above are then a lower bound,
+   * so the package-visibility rule is not applied. Optional, absent reads as false.
+   */
+  importsUnreadable?: boolean;
 }
 
 /**
@@ -157,15 +207,23 @@ export function rExportPatternMatches(
 }
 
 /**
- * True when the package's NAMESPACE exports `symbol`: an explicit `export()`, `exportClasses()`,
- * `exportMethods()` or `S3method()` entry, or an `exportPattern()` match. The one test the
- * indexer's export refinement and the rename guard both use.
+ * True when the package's NAMESPACE exports `symbol`: an explicit `export()`, `exportClasses()`
+ * or `exportMethods()` entry, or an `exportPattern()` match. An `S3method()` registration alone
+ * does not export ({@link RNamespaceInfo.s3RegisteredOnly}). The one test resolution, the
+ * visibility memo, the indexer's export refinement and the rename guard use; the refinement and
+ * the guard also keep a registered method public ({@link RNamespaceInfo.s3Registered}).
  */
 export function rNamespaceExports(
-  info: Pick<RNamespaceInfo, 'namedExports' | 'exportPatterns' | 'exportPatternBudget'>,
+  info: Pick<
+    RNamespaceInfo,
+    'namedExports' | 'exportPatterns' | 'exportPatternBudget' | 's3RegisteredOnly'
+  >,
   symbol: string,
 ): boolean {
-  return info.namedExports.has(symbol) || rExportPatternMatches(info, symbol);
+  return (
+    (info.namedExports.has(symbol) && info.s3RegisteredOnly?.has(symbol) !== true) ||
+    rExportPatternMatches(info, symbol)
+  );
 }
 
 /**
@@ -190,6 +248,66 @@ export function rExportPatternsIncomplete(
     info.exportPatternBudget?.cutShort === true ||
     info.exportPatterns.some((matcher) => matcher.exhausted === true)
   );
+}
+
+export { rSymbolVisibility, type RSymbolVisibility } from './namespace-imports.js';
+
+/**
+ * Decide, once for the whole pass, the {@link RSymbolVisibility} of every top-level name of every
+ * package that has a NAMESPACE (and of every name that package imports, which it may re-export),
+ * and record the result for `rSymbolVisibility`.
+ *
+ * Determinism: `rNamespaceExports` spends the package's `exportPattern()` budget, and
+ * {@link rExportPatternsIncomplete} reads that budget, so judging a name at the moment a site asks
+ * could give a different answer depending on which site (or file) came first. Here every name is
+ * tested in one batch, packages in directory order and names in code-unit order, and completeness
+ * is read only AFTER the whole batch: a name no pattern matched is `private` when no pattern was
+ * dropped or cut short and the NAMESPACE was fully read, `unknown` otherwise. A name outside the
+ * memo reads `unknown`. Replaces any earlier memo for `cfg`.
+ */
+export function rBuildSymbolVisibilityMemo(
+  parsedFiles: readonly ParsedFile[],
+  cfg: RPackageConfig,
+): void {
+  const namesByDir = new Map<string, Set<string>>();
+  const namesOf = (dir: string): Set<string> => {
+    let names = namesByDir.get(dir);
+    if (names === undefined) namesByDir.set(dir, (names = new Set()));
+    return names;
+  };
+  for (const parsed of parsedFiles) {
+    const dir = rOwningPackageDir(parsed.filePath, cfg);
+    if (dir === undefined || cfg.namespaceInfoByPackageDir.get(dir)?.hasNamespaceFile !== true) {
+      continue;
+    }
+    const names = namesOf(dir);
+    for (const name of rFileTopLevel(parsed).names) names.add(name);
+  }
+  for (const [dir, info] of cfg.namespaceInfoByPackageDir) {
+    if (!info.hasNamespaceFile) continue;
+    const names = namesOf(dir);
+    for (const entry of info.importFrom) names.add(rBareName(entry.name));
+  }
+
+  // Pass 1 (the batch): test every name, packages in directory order, names in code-unit order.
+  const verdicts: { info: RNamespaceInfo; dir: string; name: string; exported: boolean }[] = [];
+  for (const dir of [...namesByDir.keys()].sort()) {
+    const info = cfg.namespaceInfoByPackageDir.get(dir);
+    if (info === undefined) continue;
+    for (const name of [...namesOf(dir)].sort()) {
+      verdicts.push({ info, dir, name, exported: rNamespaceExports(info, name) });
+    }
+  }
+
+  // Pass 2: completeness is read only now, after the whole batch has spent what it will spend.
+  const memo = new Map<string, Map<string, RSymbolVisibility>>();
+  for (const { info, dir, name, exported } of verdicts) {
+    const notProvenPrivate = info.exportsUnreadable === true || rExportPatternsIncomplete(info);
+    let byName = memo.get(dir);
+    if (byName === undefined) memo.set(dir, (byName = new Map()));
+    byName.set(name, exported ? 'public' : notProvenPrivate ? 'unknown' : 'private');
+  }
+  rRecordSymbolVisibilityMemo(cfg, memo);
 }
 
 /**
@@ -342,6 +460,26 @@ const HIDDEN_SCAN_BUDGET = 5000;
 function descriptionPackageName(content: string): string | undefined {
   const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
   return /^Package:[ \t]*(\S+)/m.exec(text)?.[1];
+}
+
+/**
+ * The package names of a `DESCRIPTION` file's `Depends:` field: comma-separated entries, each a
+ * name optionally followed by a version requirement (`pkgB (>= 1.0)`), over the field's
+ * continuation lines (lines that start with a space or a tab). `R` itself is not a package.
+ */
+function descriptionDepends(content: string): Set<string> {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const out = new Set<string>();
+  const lines = text.split('\n');
+  let start = lines.findIndex((line) => line.startsWith('Depends:'));
+  if (start === -1) return out;
+  let field = lines[start].slice('Depends:'.length);
+  while (++start < lines.length && /^[ \t]/.test(lines[start])) field += `\n${lines[start]}`;
+  for (const entry of field.split(',')) {
+    const name = /^\s*([A-Za-z][A-Za-z0-9.]*)/.exec(entry)?.[1];
+    if (name !== undefined && name !== 'R') out.add(name);
+  }
+  return out;
 }
 
 /**
@@ -520,6 +658,7 @@ export async function loadRPackageConfig(repoRoot: string): Promise<RPackageConf
                 const nsContent = await readManifestFile(path.join(dir, 'NAMESPACE'));
                 const parsedExports = parseRNamespaceExports(nsContent);
                 const namedExports = new Set<string>(parsedExports.namedExports);
+                const imports = parseRNamespaceImportPackages(nsContent);
                 // POSIX classes are translated; an uncompilable pattern is skipped (never
                 // matches) and recorded so the caller can say so.
                 const exportPatterns: RExportMatcher[] = [];
@@ -550,6 +689,11 @@ export async function loadRPackageConfig(repoRoot: string): Promise<RPackageConf
                   exportPatternBudget: packageBudget,
                   exportsUnreadable: parsedExports.unreadable,
                   importFrom: parseRNamespaceImportFrom(nsContent),
+                  s3Registered: new Set((parsedExports.s3Registered ?? []).map(rBareName)),
+                  s3RegisteredOnly: new Set((parsedExports.s3RegisteredOnly ?? []).map(rBareName)),
+                  importPackages: new Set(imports.packages),
+                  depends: descriptionDepends(content),
+                  importsUnreadable: imports.unreadable,
                 });
               } catch {
                 // No NAMESPACE file or can't read it

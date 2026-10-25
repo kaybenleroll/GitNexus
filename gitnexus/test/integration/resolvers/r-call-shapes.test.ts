@@ -13,6 +13,7 @@ import {
   FIXTURES,
   getNodesByLabelFull,
   getRelationships,
+  getResolutionOutcomes,
   runPipelineFromRepo,
   type PipelineResult,
 } from './helpers.js';
@@ -53,6 +54,7 @@ describe('R: positive controls of the call-shape fixture', () => {
     expect(calls).toEqual([
       'attached_user -> helper',
       'direct_call -> helper',
+      'inherited -> describe_it',
       'shout -> greet',
       'up -> climb_up',
       'use_area -> area',
@@ -83,6 +85,14 @@ describe('R: a function used other than as a callee creates no CALLS edge', () =
     expect(getRelationships(result, 'CALLS').filter((e) => e.target === 'name')).toEqual([]);
   });
 
+  it('does not read a call through @ on an R6 instance (p@greet()) as a member call', () => {
+    expect(callsFrom('via_slot_call')).toEqual([]);
+    const sites = getResolutionOutcomes(result).filter(
+      (o) => o.filePath === 'R/uses.R' && o.name === 'greet',
+    );
+    expect(sites).toEqual([]);
+  });
+
   it('does not link UseMethod() or NextMethod() to a method', () => {
     expect(callsFrom('area')).toEqual([]);
     expect(callsFrom('area.circle')).toEqual([]);
@@ -93,11 +103,12 @@ describe('R: a function used other than as a callee creates no CALLS edge', () =
 });
 
 describe('R6: dispatch and heritage', () => {
-  it('links self$method() to a method of the same class, at the scope-call confidence', () => {
+  it('links self$method() to a method of the same class, at the receiver-call confidence', () => {
     const [edge] = callsFrom('shout');
     expect(edge.targetFilePath).toBe('R/child.R');
     expect(edge.rel.targetId).toMatch(/greet/);
-    expect(edge.rel.confidence).toBeCloseTo(0.51, 5);
+    expect(edge.rel.reason).toBe('global');
+    expect(edge.rel.confidence).toBeCloseTo(0.85, 5);
   });
 
   it('creates no edge for super$method() or private$method()', () => {
@@ -106,16 +117,21 @@ describe('R6: dispatch and heritage', () => {
     expect(callsFrom('ping')).toEqual([]);
   });
 
-  it('gives an inherited self$method() no edge to the parent method', () => {
-    expect(callsFrom('inherited')).toEqual([]);
+  it('binds an inherited self$method() to the parent method, not to a top-level function of that name', () => {
+    // Parent defines a method and a top-level function called describe_it; the call is in Child.
+    const edges = getRelationships(result, 'CALLS').filter(
+      (e) => e.source === 'inherited' && e.sourceFilePath === 'R/child.R',
+    );
+    expect(edges.map((e) => e.rel.targetId)).toEqual(['Method:R/parent.R:Parent.describe_it#0']);
+    expect(edges[0].targetLabel).toBe('Method');
   });
 
-  it('binds an inherited self$method() to a same-file top-level function of that name, at 0.49', () => {
+  it('binds an inherited self$method() to the parent method even when the child file has a top-level function of that name', () => {
     const [edge] = callsFrom('up');
-    expect(edge.targetLabel).toBe('Function');
-    expect(edge.targetFilePath).toBe('R/child.R');
-    expect(edge.target).toBe('climb_up');
-    expect(edge.rel.confidence).toBeCloseTo(0.49, 5);
+    expect(edge.targetLabel).toBe('Method');
+    expect(edge.targetFilePath).toBe('R/parent.R');
+    expect(edge.rel.targetId).toBe('Method:R/parent.R:Parent.climb_up#0');
+    expect(callsFrom('up')).toHaveLength(1);
   });
 
   it('links inherit = Parent across files to the Parent class node (positive control)', () => {
@@ -131,6 +147,12 @@ describe('R6: dispatch and heritage', () => {
       'BasePkgClass',
     );
     expect(callsFrom('again')).toEqual([]);
+    // The base is not indexed, so the member cannot be found: the shared pass's closest label.
+    expect(
+      getResolutionOutcomes(result)
+        .filter((o) => o.name === 'base_method')
+        .map((o) => (o.kind === 'suppressed' ? o.reason : o.kind)),
+    ).toEqual(['member-lookup-ambiguous']);
   });
 });
 

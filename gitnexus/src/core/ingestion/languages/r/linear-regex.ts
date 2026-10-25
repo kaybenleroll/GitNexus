@@ -14,7 +14,11 @@
  * Supported: literals, `.`, bracket expressions, `\d \D \w \W \s \S \b \B`, the
  * single-character escapes, `^ $`, groups (capturing and `(?:)`), alternation and the
  * quantifiers `* + ? {n} {n,} {n,m}` (lazy forms behave identically for a yes/no
- * test). Not supported, and compiled to `null`: back-references (`\1` to `\9`, whether or not
+ * test). Not supported, and compiled to `null`: constructs TRE reads differently from
+ * JavaScript (`\<` `\>` word boundaries, `\a` `\e` `\Q` `\E`, `\x{`, `\u` in any form, a
+ * letter class escape such as `\d` inside `[...]`, `[.x.]` and `[=x=]` elements, `{,n}`, a
+ * leading `]` in a bracket expression), which fail closed rather than match differently
+ * from R; back-references (`\1` to `\9`, whether or not
  * the group exists, as in TRE) and look-around (no
  * linear-time algorithm), named groups, legacy octal escapes, patterns longer than
  * {@link MAX_PATTERN_LENGTH} and patterns whose expansion exceeds {@link MAX_STATES}.
@@ -30,10 +34,14 @@
  * So the caps are sized for legitimate patterns and the hostile case is bounded
  * separately, by {@link MAX_TOTAL_WORK}: each matcher counts every state it visits
  * and, once the budget is spent, answers false for names it has not already decided
- * and reports `exhausted`. A visit costs 10-20 ns, so the budget is 0.4-0.8 s per
- * package however many names are tested: measured on the development machine, `a?`
- * repeated 500 or 8,000 times then `c`, `[A-Za-z]{1,2000}c`, and a 120-way alternation
- * of `a...ab` each exhaust it in ~0.4 s against 50,000 distinct 100-character names.
+ * and reports `exhausted`. A state visit inside a long search costs 10-20 ns, but a test
+ * costs more than its state visits (the memo lookup and insert, setting up the search), and
+ * that part is not charged: many short tests cost up to about 70 ns a counted visit (measured
+ * on the development machine: 50-56 ns for 2,000 trivial patterns against 5,000 names, about
+ * 70 ns for 50,000 names against two patterns), so the 30M package cap is about 2 s and the
+ * 100M load cap about 7 s at worst: bounded, never a hang. A hostile pattern spends its
+ * visits inside long searches: `(a?){100}a{100}` against 5,000 names spends the package cap
+ * in about 0.4 s.
  * Realistic patterns stay far below it: 500 alternated identifiers, anchored or not,
  * cost about 20 visits per name, because alternatives that share a prefix share
  * states. Verdicts are memoised per distinct name, so a repeated name costs one lookup, which is
@@ -98,7 +106,8 @@ export const MAX_TOTAL_WORK = 40_000_000;
 /**
  * State visits all the matchers of one package-config load may spend together (the
  * default limit of a {@link SharedWorkBudget}), in addition to the per-matcher
- * {@link MAX_TOTAL_WORK}. At 9-10 ns a visit it is about one second: enough for two
+ * {@link MAX_TOTAL_WORK}. About one second for hostile searches (10 ns a visit), up to
+ * about 7 s for many short tests (see the cost model above): enough for two
  * and a half pathological patterns to run to their own cap, after which the rest of
  * the load's patterns stop and are reported, so a hostile NAMESPACE cannot cost more
  * than that however many patterns it carries. Benign work is a tiny fraction of it: a
@@ -122,9 +131,10 @@ export const MAX_SHARED_STATES = 500_000;
 
 /**
  * State visits one package may spend on matching, out of {@link MAX_SHARED_WORK} (30 %,
- * about 0.3 s): one hostile package then cannot take the load's whole budget, so the
- * packages after it keep their patterns. Three hostile packages spend the load's
- * budget; the packages after those degrade, with a warning per pattern.
+ * about 0.4 s for a hostile pattern, up to about 2 s for many short tests): one hostile
+ * package then cannot take the load's whole budget, so the packages after it keep their
+ * patterns. Three hostile packages spend the load's budget; the packages after those
+ * degrade, with a warning per pattern.
  */
 export const MAX_PACKAGE_WORK = 30_000_000;
 
@@ -351,6 +361,7 @@ type EscapeResult =
 
 /** `{n}`, `{n,}`, `{n,m}` at the sticky cursor. */
 const BRACES = /\{(\d+)(?:(,)(\d*))?\}/y;
+const LOWER_BOUND_OMITTED = /\{,\d*\}/y;
 
 class Parser {
   private pos = 0;
@@ -458,7 +469,12 @@ class Parser {
   private tryReadBraces(): { min: number; max: number; length: number } | null {
     BRACES.lastIndex = this.pos;
     const m = BRACES.exec(this.src);
-    if (m === null) return null;
+    if (m === null) {
+      // TRE reads `{,n}` as `{0,n}`; JavaScript as literal text. Refuse rather than guess.
+      LOWER_BOUND_OMITTED.lastIndex = this.pos;
+      if (LOWER_BOUND_OMITTED.test(this.src)) reject('{,n} quantifier is read differently by TRE');
+      return null;
+    }
     const min = Number(m[1]);
     const max = m[2] === undefined ? min : m[3] === '' ? Infinity : Number(m[3]);
     return { min, max, length: m[0].length };
@@ -513,6 +529,11 @@ class Parser {
     const c = this.peek();
     if (c === undefined) return reject('\\ at end of pattern');
     this.pos++;
+    // TRE reads a backslash inside a bracket expression as a literal member, not as an
+    // escape, so a letter class escape there means different things to R and to this parser.
+    if (inClass && 'dDwWsSb'.includes(c)) {
+      reject('letter class escape inside a bracket expression (TRE reads the backslash literally)');
+    }
     switch (c) {
       case 'd':
         return { ranges: DIGIT, classEscape: true };
@@ -554,7 +575,16 @@ class Parser {
         this.pos--;
         return { code: 0x5c };
       }
+      case '<':
+      case '>':
+        return reject('\\< and \\> are TRE word boundaries, not modelled');
+      case 'a':
+      case 'e':
+      case 'Q':
+      case 'E':
+        return reject(`\\${c} has a TRE meaning that is not modelled`);
       case 'x': {
+        if (this.peek() === '{') return reject('\\x{...} is not modelled');
         if (isHexDigit(this.peek()) && isHexDigit(this.peek(1))) {
           const code = parseInt(this.src.slice(this.pos, this.pos + 2), 16);
           this.pos += 2;
@@ -562,14 +592,8 @@ class Parser {
         }
         return { code: 0x78 };
       }
-      case 'u': {
-        const digits = this.src.slice(this.pos, this.pos + 4);
-        if (/^[0-9A-Fa-f]{4}$/.test(digits)) {
-          this.pos += 4;
-          return { code: parseInt(digits, 16) };
-        }
-        return { code: 0x75 };
-      }
+      case 'u':
+        return reject('\\u is not modelled (TRE reading unverified)');
       case 'k':
         // Identity escape (no named groups exist; `parseGroup` rejects those).
         return { code: 0x6b };
@@ -589,10 +613,15 @@ class Parser {
       negated = true;
       this.pos++;
     }
+    // POSIX makes a leading `]` a literal member; JavaScript reads `[]` as an empty class.
+    if (this.peek() === ']') reject('leading ] in a bracket expression is read differently by TRE');
     const ranges: Range[] = [];
     for (;;) {
       const ch = this.peek();
       if (ch === undefined) reject('unterminated character class');
+      if (ch === '[' && (this.peek(1) === '.' || this.peek(1) === '=')) {
+        reject('collating and equivalence elements are not modelled');
+      }
       if (ch === ']') {
         this.pos++;
         break;

@@ -63,8 +63,9 @@
  *     blanket rule below (an unnamed scope, harmless).
  *
  *   - `library()`/`require()` are wildcard imports (`@import.wildcard`) —
- *     every top-level name of the named local package becomes visible,
- *     unfiltered by NAMESPACE (see `rScopeResolver.expandsWildcardTo`).
+ *     the named local package's exported names become visible (every
+ *     top-level name when it has no NAMESPACE file; see
+ *     `rScopeResolver.expandsWildcardTo`, which filters by NAMESPACE).
  *     `source()` is a side-effect import (`@import.side-effect`) — it
  *     establishes a file dependency but binds no name; cross-file free
  *     calls into a `source()`d file resolve via `allowGlobalFreeCallFallback`
@@ -74,6 +75,13 @@
  *     an explicit receiver — the same shape as Ruby's `obj.method`.
  *     `Type$new(...)` is R6's constructor spelling: captured separately as
  *     `@type-binding.constructor` so `x <- Type$new(...)` types `x`.
+ *
+ *   - `a$b$m()` and `Cls$new()$m()` (the receiver is itself an `extract_operator` or a `call`)
+ *     are chained member calls. R never types through a chain (R6 fields and results carry no
+ *     declared type), so `emitRScopeCaptures` mints `@reference.receiver-chain` with the shared
+ *     codec's `truncated` marker: the shared fold refuses it and the call ends as an unresolved
+ *     receiver (an outcome, no edge) instead of reaching a same-named free function. A chain
+ *     with no variable base mints nothing at all (an invisible gap, see `rReceiverChain`).
  *
  * Exposes lazy `Parser` and `Query` singletons so callers don't pay
  * tree-sitter init cost per file.
@@ -117,6 +125,26 @@ export const R_SCOPE_QUERY = `
 (call
   function: (identifier) @_s4_scope
   (#match? @_s4_scope "^(setClass|setRefClass)$")) @scope.class
+
+;; Braces that R evaluates in an environment of their own (\`local({...})\`, \`with(data, {...})\`,
+;; \`within(data, {...})\`, testthat's \`test_that(desc, {...})\`, \`describe()\` and \`it()\`): a
+;; definition inside binds in the block, not in the module or the enclosing function, so it is
+;; reachable from those braces only. \`withr::with_*()\` and \`suppressWarnings({...})\` evaluate
+;; their braces in the caller's frame and get no scope. Bare or \`pkg::\`-qualified.
+(call
+  function: (identifier) @_blkfn
+  (#match? @_blkfn "^(local|test_that|describe|it|with|within)$")
+  arguments: (arguments
+    (argument
+      value: (braced_expression) @scope.block)))
+
+(call
+  function: (namespace_operator
+    rhs: (identifier) @_blkfn_ns
+    (#match? @_blkfn_ns "^(local|test_that|describe|it|with|within)$"))
+  arguments: (arguments
+    (argument
+      value: (braced_expression) @scope.block)))
 
 ;; ── Declarations — functions ──────────────────────────────────────────────
 
@@ -249,8 +277,8 @@ export const R_SCOPE_QUERY = `
     (argument
       value: [(identifier) (string)] @import.source))) @import.side-effect
 
-;; library("pkg") / require("pkg") — wildcard: every top-level name of the
-;; named local package becomes visible (rScopeResolver.expandsWildcardTo).
+;; library("pkg") / require("pkg") — wildcard: the exported names of the
+;; named local package become visible (rScopeResolver.expandsWildcardTo).
 (call
   function: (identifier) @_libfn
   (#match? @_libfn "^(library|require)$")
@@ -327,7 +355,8 @@ export const R_SCOPE_QUERY = `
 
 ;; ── References — calls ────────────────────────────────────────────────────
 
-;; Free calls: foo(x)
+;; Free calls: foo(x). emitRScopeCaptures renames the call to its setter (foo<-) when it sits in
+;; an assignment target (foo(x) <- v), see isRReplacementCall in assignment.ts.
 (call
   function: (identifier) @reference.name) @reference.call.free
 
@@ -337,10 +366,22 @@ export const R_SCOPE_QUERY = `
   function: (namespace_operator
     rhs: (identifier) @reference.name) @reference.qualified-name) @reference.call.free
 
-;; Member calls via $: obj$method()
+;; Member calls via $: obj$method(). Only $: the grammar uses extract_operator for @ too, and
+;; u@save() on an R6 instance is an error in R, not a member call (no site).
 (call
   function: (extract_operator
     lhs: (identifier) @reference.receiver
+    operator: "$"
+    rhs: (identifier) @reference.name)) @reference.call.member
+
+;; Chained member calls: a$b$m(), Cls$new()$m(). The receiver is itself an extract_operator or a
+;; call; the pattern is disjoint from the one above (an identifier receiver), so no call is
+;; matched twice. emitRScopeCaptures turns the receiver into a truncated chain, or drops the match
+;; when the chain has no variable base (get_user()$m(), pkg::Cls$new()$m(), x[[1]]$f$m()).
+(call
+  function: (extract_operator
+    lhs: [(extract_operator) (call)] @reference.receiver
+    operator: "$"
     rhs: (identifier) @reference.name)) @reference.call.member
 `;
 

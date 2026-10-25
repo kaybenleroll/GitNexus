@@ -1,8 +1,9 @@
 /**
  * R language provider.
  *
- * `library()` / `require()` of a local package are wildcard imports: every top-level
- * name of the package becomes visible. `source()` binds no name; it only records a file
+ * `library()` / `require()` of a local package are wildcard imports: the package's
+ * exported names become visible (every top-level name when it has no NAMESPACE file).
+ * `source()` binds no name; it only records a file
  * dependency. Named imports come from NAMESPACE `importFrom()` entries, which
  * `populateRNamespaceImports` turns into `named` imports before resolution. No special
  * call routing is needed (unlike Ruby); `emitRScopeCaptures` (`r/captures.ts`) produces
@@ -15,7 +16,8 @@ import { typeConfig as rTypeConfig } from '../type-extractors/r.js';
 import { R_QUERIES } from '../tree-sitter-queries.js';
 import { RFieldExtractor } from '../field-extractors/r.js';
 import { rMethodExtractor } from '../method-extractors/r.js';
-import { emitRScopeCaptures } from './r/captures.js';
+import { emitRScopeCaptures, rScopeOwnsReceivers } from './r/captures.js';
+import { collectRCaptureSideChannel } from './r/r6-self.js';
 import { interpretRImport, interpretRTypeBinding } from './r/interpret.js';
 import { rPostParse } from './r/post-parse.js';
 import {
@@ -192,6 +194,9 @@ export const rProvider = defineLanguage({
   methodExtractor: rMethodExtractor,
   builtInNames: R_BUILT_INS,
   emitScopeCaptures: emitRScopeCaptures,
+  // Where the R6 private members are (`self$m()` never reaches one), carried to the main thread.
+  collectCaptureSideChannel: collectRCaptureSideChannel,
+  scopeOwnsReceivers: rScopeOwnsReceivers,
   interpretImport: interpretRImport,
   interpretTypeBinding: interpretRTypeBinding,
   postParse: rPostParse,
