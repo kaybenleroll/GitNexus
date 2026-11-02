@@ -1,0 +1,30 @@
+name: Seed shard timings (fork only)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/seed-timings.yml
+      - .seed/timings/*.json
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Stage committed timing snapshot
+        run: |
+          mkdir -p .vitest/timings
+          cp .seed/timings/*.json .vitest/timings/
+          ls -l .vitest/timings
+      - name: Save timing cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        with:
+          path: .vitest/timings
+          key: test-timings-v1-node22-vitest5-seed-1
