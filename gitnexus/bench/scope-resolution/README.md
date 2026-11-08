@@ -13,7 +13,9 @@ plus callers and helpers. Rust also needs a root
 module file; Objective-C has a header and implementation per entity. Java adds an
 isolated producer file and exercises transitive factory returns and repeated
 unreachable return-name lookups. Swift uses same-module visibility; COBOL exercises
-program references and procedure pointers. Other arms import the preceding file and call through its
+program references and procedure pointers. R sources the preceding file and calls
+through an R6 instance; the second call of its chain stays unresolved, because R6
+method results carry no type. Other arms import the preceding file and call through its
 return value. These generated sources exercise the analyzer; they are not builds
 or representative application benchmarks.
 
@@ -118,3 +120,5 @@ provider hooks, including elapsed emit time and graph counts. `sr-post-resolve`
 marks the end of the initial registry lookup only; substantial resolution still
 follows it. These markers distinguish that work on the next reporter run.
 The private repository's complete OOM has not been reproduced by these probes.
+
+For the import-emission memory benchmark, see [its README](../import-emission/README.md).
