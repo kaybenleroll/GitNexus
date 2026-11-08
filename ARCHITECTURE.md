@@ -372,6 +372,8 @@ A provider can explicitly restrict its edge mode. COBOL currently uses
 and scope resolution contributes procedure-pointer calls. Registration alone is
 not a claim that every language feature uses identical resolution rules.
 
+Shared code does not name languages. When a language needs an extension point that does not exist yet, it is added as an optional `LanguageProvider` hook that no other language has to implement (R's `postParse` and `resolveMemberOwnerNode`; see the hook table below).
+
 ### Pipeline stages
 
 ```
@@ -568,7 +570,7 @@ CI auto-discovers the set via `tsx`. No workflow edit required.
 
 ## Language-agnostic graph feeding
 
-18 languages → single unified graph. Four abstraction layers:
+19 languages → single unified graph. Four abstraction layers:
 
 ```
  Unified Graph Schema (44 node types, 21 relationship types)
@@ -594,8 +596,10 @@ Each language implements `LanguageProvider` (`language-provider.ts`). Key fields
 | `mroStrategy`          | `first-wins` / `c3` / `none`                                                                                                                                                                                                                                                                                                      |
 | `descriptionExtractor` | Optional hook returning a symbol's doc-comment text as its `description`; feeds the embedding metadata header so doc-only terms are semantically searchable (issue #2270). Most languages register `createLeadingDocDescriptionExtractor` (shared, language-neutral; per-language comment/wrapper config passed at the call site) |
 | `definitionPropertiesExtractor` | Optional language-owned hook for structured, clone-safe definition metadata. Shared ingestion persists these properties opaquely; the owning provider supplies the extraction semantics. |
+| `postParse` | Optional. Whole-graph pass a language runs once after every chunk is merged and before scope resolution (deferred owner resolution, manifest-driven export refinement). Called once per analyze, awaited, only when the language has parsed files; a throw aborts the parse phase. Incremental analyse writes back only changed files, so a mutation of an unchanged file's nodes is not persisted; a hook whose result depends on manifests that are not parsed sources needs `--force` after such an edit. R: deferred `setMethod`/R6 owners + NAMESPACE exports. |
+| `resolveMemberOwnerNode` | Optional. For languages whose members are owned by a call/assignment rather than an enclosing container node (R: R6/RefClass): returns the node the method and field extractors read members from, or null. Consulted by the enclosing-owner slot after the container walk and `resolveFileTypeOwner` (same slot; Zig file-owner is the precedent). Not an S4 mechanism: R's `setMethod(...)` returns null (its owner is a string-literal class name, not a node); S4 ownership arrives only through the `ownerNameHint` → `postParse` path. |
 
-18 providers in `languages/index.ts` via `satisfies Record<SupportedLanguages, LanguageProvider>` — missing a language is a compile error.
+19 providers in `languages/index.ts` via `satisfies Record<SupportedLanguages, LanguageProvider>` — missing a language is a compile error.
 
 ### Unified capture tags
 
@@ -640,25 +644,45 @@ Inheritance is captured by the `@reference.inherits` tag and emitted by the scop
 
 ```
 CLI (analyze.ts) → runFullAnalysis(repoPath, options, callbacks)
-  1. Early exit if lastCommit == HEAD (unless --force)     [0%]
-  2. Cache existing embeddings from prior index             [0%]
-  3. runPipelineFromRepo() → KnowledgeGraph                [0-60%]
-  4. Clean up legacy KuzuDB files                          [60%]
-  5. initLbug() → loadGraphToLbug() via CSV streaming      [60-85%]
-  6. Create FTS indexes (File, Function, Class, Method...) [85-90%]
-  7. Restore cached embeddings (batch insert)              [88%]
-  8. Generate new embeddings if --embeddings               [90-98%]
-  9. Save metadata + register repo + update .gitignore     [98-100%]
- 10. Generate AI context files (AGENTS.md, CLAUDE.md)      [100%]
+  1. Admit phase resources and recover any prepared graph publication.
+  2. Reuse unchanged graph/parser work where its receipts still match.
+  3. runPipelineFromRepo() → KnowledgeGraph → bounded graph write → FTS.
+  4. Prepare the owned graph and publication receipt; drain native resources.
+  5. Supervisor waits for graph-process exit, verifies and publishes metadata.
+  6. If embeddings are requested/pending, open the resumable embedding job.
+  7. Reuse verified vectors, commit bounded units, then seal/checkpoint/publish.
+  8. Register the repo and generate AI context files.
+
+Graph-only legacy slots keep their existing path until separate publication is
+needed. A ready graph remains queryable while an embedding job is pending;
+semantic search reports degradation until a compatible sealed artifact is ready.
 ```
 
-**Options:** `--force` (rebuild regardless), `--embeddings` (opt-in, skipped if >50k nodes), `--skipGit`, `--noStats`.
+Unit acknowledgements follow verified, durable WAL commits. Native automatic
+checkpoints bound WAL growth; the final checkpoint prepares the sealed artifact
+for read-only publication without requiring WAL replay.
+
+Automatic resource admission uses 75% of effective process/container RAM as a
+fixed process-family ceiling, divided across concurrent analyses. Each phase
+accounts for the main heap, retained supervisor, native pools and headroom;
+parser workers and embedding model/queues use separate phase reservations.
+Parser workers reserve at least the main-heap allocation because Node's process
+heap flag overrides per-worker V8 limits. Automatic main-heap sizing leaves room
+for required worker reservations. Explicit limits never expand the family
+ceiling; combinations that cannot fit fail admission.
+This bounds reservations, not operating-system RSS.
+
+**Options:** `--force` (rebuild regardless), `--embeddings` (opt-in, resumable), `--skipGit`, `--noStats`.
 
 ## Storage
 
 ```
 <repo>/.gitnexus/
-  ├── lbug           # LadybugDB database
+  ├── lbug           # Legacy monolithic database, until first separate publication
+  ├── lbug.generation.<id>  # Owned private graph, selected by graphPath in metadata
+  ├── analysis-publication.json  # Recoverable prepared graph receipt
+  ├── embeddings/<identity>/     # Job journal, manifest and separate vector database
+  ├── embeddings/spaces/         # Model-space ownership/reuse receipts
   ├── lbug.wal       # Write-ahead log
   ├── lbug.shadow    # Shadow sidecar (checkpoint staging)
   ├── lbug.lock      # Single-writer lock
@@ -690,7 +714,11 @@ the read-only open is retried — see `sidecar-recovery.ts`
 (`isReadOnlyCheckpointInProgressError`) and the
 `lbug-interrupted-checkpoint-recovery` integration test.
 
-Managed by `repo-manager.ts`.
+Managed by `repo-manager.ts`. Publication reclaims unreferenced private graphs
+and job artifacts under the slot lock, preserving current jobs, model spaces,
+legacy reuse sources and prepared publications. Busy reader files are retried on
+a later publication. See [MIGRATION.md](MIGRATION.md#resumable-analysis-and-separate-vector-storage-3598)
+before mixing binary versions or rolling back.
 
 ### Automatic parse-cache identity
 
@@ -794,4 +822,5 @@ Node IDs use arity suffix (`#<paramCount>`): `Method:file:Class.method#1` vs `#2
 - [GUARDRAILS.md](GUARDRAILS.md) — safety boundaries for humans and agents
 - [TESTING.md](TESTING.md) — how to run tests
 - [docs/languages/objective-c-provider.md](docs/languages/objective-c-provider.md) — Objective-C provider behavior and limits
+- [docs/languages/r-provider.md](docs/languages/r-provider.md) — R provider behavior and limits
 - `AGENTS.md` / `CLAUDE.md` — agent workflows and tool usage
