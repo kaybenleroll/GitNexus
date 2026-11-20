@@ -54,6 +54,10 @@ const infrastructure: Record<string, string> = {
   'types/pipeline.ts:core/lbug/pdg-emit-sink.ts': 'Type-only graph writer contract.',
   'storage/parsedfile-store.ts:storage/fs-atomic.ts':
     'Atomic byte transport, not serialized output interpretation.',
+  'storage/parse-cache.ts:storage/fs-atomic.ts':
+    'Immutable pack transport, independently checked by record checksums and envelope validation.',
+  'storage/file-result-store.ts:storage/fs-atomic.ts':
+    'Atomic byte transport, independently checked by record checksums and envelope validation.',
   'storage/v8-sidecar.ts:storage/fs-atomic.ts':
     'Atomic byte transport, independently checked by envelope validation.',
 };
@@ -266,7 +270,7 @@ describe('parse artifact input ownership', () => {
     for (const file of PARSE_CACHE_BASE_FILES)
       expect(existsSync(path.join(sourceRoot, file)), file).toBe(true);
     for (const source of Object.values(GRAMMAR_SOURCES)) {
-      expect(source.packageName).toMatch(/^tree-sitter-/);
+      expect(source.packageName).toMatch(/^(?:@[a-z0-9_.-]+\/)?tree-sitter-/);
       expect(typeof source.load).toBe('function');
     }
   });

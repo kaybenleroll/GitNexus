@@ -33,6 +33,7 @@ import type {
 } from 'gitnexus-shared';
 import type { TypeRef } from 'gitnexus-shared';
 import type { KnowledgeGraph } from '../../../graph/types.js';
+import { GraphReferenceIntegrityError } from '../../../graph/relationship-integrity.js';
 import { generateId } from '../../../../lib/utils.js';
 import { lookupOwnedMembersByOwner } from '../../model/owned-members-lookup.js';
 import type { MutableSemanticModel, SemanticModel } from '../../model/semantic-model.js';
@@ -161,6 +162,7 @@ function applySelectedCallResultBinding(
   indexes: ScopeResolutionIndexes,
   workspaceIndex: ReturnType<typeof buildWorkspaceResolutionIndex>,
   selected: SymbolDefinition | null | undefined,
+  elementType?: ScopeResolver['callResultElementType'],
 ): boolean {
   const scope = indexes.scopeTree.getScope(assignment.inScope);
   if (scope === undefined) return false;
@@ -168,7 +170,12 @@ function applySelectedCallResultBinding(
     selected == null
       ? undefined
       : workspaceIndex.declaredReturnTypeByCallableId.get(selected.nodeId);
-  return setCallResultBinding(scope, assignment.lhs, returned);
+  // An element of the result is typed only by the provider's route answer.
+  const bound =
+    selected == null || returned === undefined || assignment.element === undefined
+      ? returned
+      : elementType?.(selected, returned, assignment.element, indexes);
+  return setCallResultBinding(scope, assignment.lhs, bound);
 }
 
 /**
@@ -176,7 +183,8 @@ function applySelectedCallResultBinding(
  * Ambiguous dispatch and missing return annotations deliberately produce no
  * binding. Extraction emits these facts only for untyped declarations, so an
  * existing entry here is necessarily inference/mirroring and may be corrected;
- * explicit annotations never enter this join.
+ * explicit annotations never enter this join. A site in `refused` (see
+ * `ScopeResolver.callResultAssignmentApplies`) is left out entirely.
  */
 export function applyPreciseCallResultBindings(
   parsedFiles: readonly ParsedFile[],
@@ -187,11 +195,13 @@ export function applyPreciseCallResultBindings(
   model: SemanticModel,
   requireOwnedHoistedReturn = false,
   selectedCalls?: ReadonlyMap<string, SymbolDefinition | null>,
+  refused?: ReadonlySet<CallResultAssignmentSite>,
 ): number {
   let updated = 0;
   if (selectedCalls !== undefined) {
     for (const parsed of parsedFiles) {
       for (const assignment of parsed.callResultAssignmentSites ?? []) {
+        if (refused?.has(assignment) === true) continue;
         if (
           applySelectedCallResultBinding(
             assignment,
@@ -227,6 +237,8 @@ export function applyPreciseCallResultBindings(
       }
     }
     for (const assignment of parsed.callResultAssignmentSites ?? []) {
+      // An element route needs the exact selected callee; see above.
+      if (assignment.element !== undefined || refused?.has(assignment) === true) continue;
       const scope = indexes.scopeTree.getScope(assignment.inScope);
       if (scope === undefined) continue;
       const targets = resolvedByPosition.get(
@@ -312,8 +324,8 @@ import { logger } from '../../../logger.js';
  *     graph (so this pass is a no-op when the legacy path already emitted it).
  *   - `seen` — per-site key shared with the generic edge bridge so the two
  *     passes never double-emit the same resolution.
- * The `dedupKey` and `rel:` id shape match `tryEmitEdge` exactly, so graph
- * output stays byte-identical. The caller is the enclosing class (NOT the
+ * This prepass retains its point-only identity; unlike full spans emitted by
+ * `tryEmitEdge`, it cannot certify source-site distinctness. The caller is the enclosing class (NOT the
  * method/constructor `resolveCallerGraphId` would prefer — that broke MRO for
  * C# 12 primary constructors, #1951); the edge type is pre-discriminated.
  */
@@ -1067,6 +1079,11 @@ export function runScopeResolution(
     hooks: {
       ownedMembersBindAtModuleScope: provider.ownedMembersBindAtModuleScope,
       importsBindAtLexicalScope: provider.importsBindAtLexicalScope === true,
+      // `GITNEXUS_DISABLE_IMPORT_GROUPS=1` restores one edge per imported file,
+      // for comparing the two storage forms on the same build.
+      groupsWildcardTargets:
+        provider.groupsWildcardImportTargets === true &&
+        !parseTruthyEnv(process.env.GITNEXUS_DISABLE_IMPORT_GROUPS),
       resolveImportTarget: (targetRaw, fromFile, _workspaceIndex, parsedImport) =>
         provider.resolveImportTarget(targetRaw, fromFile, allFilePaths, resolutionConfig, {
           parsedFiles,
@@ -1083,10 +1100,15 @@ export function runScopeResolution(
               filterWildcardNames(targetModuleScope, names, parsedFiles),
       mergeBindings: (existing, incoming, scopeId) =>
         provider.mergeBindings(existing, incoming, scopeId),
+      mergeBindingsAreAssociative: provider.mergeBindingsAreAssociative,
       wildcardCollisionIsAmbiguous: provider.exclusiveWildcardReexports === true,
       namedImportsBindTopLevelOnly: provider.namedImportsBindTopLevelOnly === true,
+      wildcardReexportExcludedNames: provider.wildcardReexportExcludedNames,
     },
   });
+  // Import-visible namespaces are bindings: publish them before the first pass
+  // that reads one (inheritance resolution below).
+  provider.populateImportNamespaces?.(parsedFiles, finalized);
   if (referenceBindings !== undefined) {
     for (const site of finalized.referenceSites)
       referenceBindings.set(site, {
@@ -1186,17 +1208,6 @@ export function runScopeResolution(
     postHeritageNodeLookup,
   );
 
-  // Replace the empty MethodDispatchIndex that finalizeScopeModel
-  // builds by design with the populated one derived from the
-  // language's MRO. Spread produces a fresh `ScopeResolutionIndexes`
-  // instead of mutating the finalized result through an `as` cast —
-  // downstream passes get an object whose readonly guarantees match
-  // the type system.
-  const indexes = {
-    ...finalized,
-    methodDispatch: buildPopulatedMethodDispatch(mroByClassDefId, extendsOnlyMroByClassDefId),
-  };
-
   // Build the workspace resolution index ONCE — scope-valued lookups
   // (`classScopeByDefId`, `moduleScopeByFile`) that `SemanticModel`
   // cannot carry. Must run AFTER `populateOwners` (so owned defs are
@@ -1206,10 +1217,29 @@ export function runScopeResolution(
   // views that delegate to it (out-of-core scope index) — the index pins no Scope objects, so the
   // disk seal can reclaim them. Byte-identical: the view returns the same Scope
   // the resident tree holds (or a value-identical revived one in disk mode).
-  const workspaceIndex = buildWorkspaceResolutionIndex(parsedFiles, indexes.scopeTree, {
+  const methodDispatch = buildPopulatedMethodDispatch(mroByClassDefId, extendsOnlyMroByClassDefId);
+  const workspaceIndex = buildWorkspaceResolutionIndex(parsedFiles, finalized.scopeTree, {
     stripTypePreservingDecoration: provider.stripTypePreservingDecoration,
+    namespaceExports: provider.namespaceExportsFromModuleExports
+      ? provider.moduleExports
+      : undefined,
   });
   logHeapProbe('sr-post-workspaceIndex', `lang=${provider.language}`);
+
+  // Replace the empty MethodDispatchIndex that finalizeScopeModel
+  // builds by design with the populated one derived from the
+  // language's MRO, and install the provider's namespace exports. Spread
+  // produces a fresh `ScopeResolutionIndexes` instead of mutating the
+  // finalized result through an `as` cast — every member is written here,
+  // once, and downstream passes get an object whose readonly guarantees
+  // match the type system.
+  const indexes: ScopeResolutionIndexes = {
+    ...finalized,
+    methodDispatch,
+    ...(workspaceIndex.namespaceExportsByFile === undefined
+      ? {}
+      : { namespaceExportsByFile: workspaceIndex.namespaceExportsByFile }),
+  };
 
   // Complete implicit namespace visibility and refine provider-owned type facts
   // before return propagation. New bindings use bindingAugmentations; existing
@@ -1243,6 +1273,10 @@ export function runScopeResolution(
       workspaceIndex,
       provider.resolveQualifiedCallee,
       allFilePaths,
+      provider.elementTypeOf,
+      provider.followsInstanceCallResultTypes === true
+        ? (owner, name) => input.model.methods.lookupAllByOwner(owner, name)
+        : undefined,
     );
   }
 
@@ -1263,6 +1297,18 @@ export function runScopeResolution(
   // VALIDATE_SEMANTIC_MODEL=1.
   validateBindingsImmutability(indexes, onWarn);
 
+  // Decided once, before any call-result binding is cleared or applied.
+  const refusedCallResultSites = new Set<CallResultAssignmentSite>();
+  const callResultAssignmentApplies = provider.callResultAssignmentApplies;
+  if (callResultAssignmentApplies !== undefined) {
+    for (const parsed of parsedFiles) {
+      for (const assignment of parsed.callResultAssignmentSites ?? []) {
+        if (!callResultAssignmentApplies(assignment, indexes))
+          refusedCallResultSites.add(assignment);
+      }
+    }
+  }
+
   const selectedCalls =
     provider.receiverCallSite === undefined
       ? undefined
@@ -1274,6 +1320,7 @@ export function runScopeResolution(
   if (callResultProducers !== undefined) {
     for (const parsed of parsedFiles) {
       for (const assignment of parsed.callResultAssignmentSites ?? []) {
+        if (refusedCallResultSites.has(assignment)) continue;
         callResultProducers.set(
           callResultBindingKey(assignment.inScope, assignment.lhs),
           assignment,
@@ -1290,7 +1337,13 @@ export function runScopeResolution(
       ? undefined
       : (key: string, definition: SymbolDefinition | null): void => {
           for (const assignment of assignmentsByProducer.get(key) ?? []) {
-            applySelectedCallResultBinding(assignment, indexes, workspaceIndex, definition);
+            applySelectedCallResultBinding(
+              assignment,
+              indexes,
+              workspaceIndex,
+              definition,
+              provider.callResultElementType,
+            );
           }
         };
   if (!callableFlowOnly && selectedCalls !== undefined) {
@@ -1305,6 +1358,7 @@ export function runScopeResolution(
       readonlyModel,
       provider.hoistedTypeBindingsRequireOwner === true,
       selectedCalls,
+      refusedCallResultSites,
     );
   }
 
@@ -1579,6 +1633,7 @@ export function runScopeResolution(
               : undefined,
           constructorCallTargetsClass: provider.constructorCallTargetsClass === true,
           markConstructionSites: provider.markConstructionSites === true,
+          bareCallConstructs: provider.constructionSyntax?.bare === true,
           isFileLocalDef: provider.isFileLocalDef,
           isBuiltInName: provider.languageProvider.isBuiltInName,
           freeCallsRequireInstanceOwnership: provider.freeCallsRequireInstanceOwnership === true,
@@ -1588,6 +1643,7 @@ export function runScopeResolution(
           resolveAdlCandidates: provider.resolveAdlCandidates,
           resolveOrdinaryCallables: provider.resolveOrdinaryCallables,
           resolveQualifiedFreeCall: provider.resolveQualifiedFreeCall,
+          qualifiedFreeCallOutranksNameClaim: provider.qualifiedFreeCallOutranksNameClaim,
           resolveUnqualifiedCall: provider.resolveUnqualifiedCall,
           selectedCalls,
           onSelectedCall,
@@ -1613,6 +1669,7 @@ export function runScopeResolution(
           readonlyModel,
           provider.hoistedTypeBindingsRequireOwner === true,
           selectedCalls,
+          refusedCallResultSites,
         );
   if (replayedCallResultBindings > 0 || selectedCalls !== undefined) {
     const handledBeforeReplay = new Set(handledSites);
@@ -1881,9 +1938,25 @@ export function runScopeResolution(
             ),
         });
   probeEmit('callable-flow-end', `iterations=${callableValueFlow.iterations}`);
+  const onDemandImportTargets = provider.onDemandImportTargets;
+  const importSources =
+    onDemandImportTargets === undefined
+      ? undefined
+      : new Map(emitParsedFiles.map((parsed) => [parsed.filePath, parsed]));
   const importsEmitted = callableFlowOnly
     ? 0
-    : emitImportEdges(graph, indexes.imports, indexes.scopeTree, provider.importEdgeReason);
+    : emitImportEdges(
+        graph,
+        indexes.imports,
+        indexes.scopeTree,
+        provider.importEdgeReason,
+        onDemandImportTargets === undefined
+          ? undefined
+          : (sourceFile) => {
+              const parsed = importSources?.get(sourceFile);
+              return parsed === undefined ? undefined : onDemandImportTargets(parsed, indexes);
+            },
+      );
   probeEmit('imports-end', `emitted=${importsEmitted}`);
 
   // Language-specific supplementary edges (e.g. Vue template-derived
@@ -2194,6 +2267,7 @@ export function runScopeResolution(
           }
         }
       } catch (err) {
+        if (err instanceof GraphReferenceIntegrityError) throw err;
         // Last-resort isolation, mirroring the worker-side per-file try/catch:
         // a shape the predicate misses must cost this one file's CFG, not
         // abort the language's whole scope-resolution pass mid-graph-build.

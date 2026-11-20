@@ -133,9 +133,18 @@ export type {
 // SCC-aware cross-file finalize (RFC §3.2 Phase 2; Ring 2 SHARED #915)
 export {
   finalize,
+  importNameFiltersAllow,
   indexExportsByName,
   indexTopLevelExportsByName,
 } from './scope-resolution/finalize-algorithm.js';
+export type { ImportMembership, ImportVisibility } from './scope-resolution/import-visibility.js';
+export type { ImportEntry, ImportGroup } from './scope-resolution/import-groups.js';
+export { createGroupedImportVisibility } from './scope-resolution/import-groups.js';
+export {
+  createEagerImportVisibility,
+  importTargetDirectory,
+  isSelectableImport,
+} from './scope-resolution/import-visibility.js';
 export type {
   FinalizeInput,
   FinalizeFile,
