@@ -103,7 +103,7 @@ A class name that is not unique: a member attaches to the class of its own file 
 
 Not supported:
 
-- The magrittr pipe `%>%` has no specific support and none is claimed; the native pipe `|>` is supported. tidyverse non-standard evaluation (bare column names, `.data$x`) is not modelled.
+- The magrittr pipes (`%>%`, `%<>%`, `%T>%`, `%$%`) have no pipe-specific support, but a stage written as a call (`x %>% f()`, each stage of `x %>% g() %>% f()`) parses as an ordinary call and is linked like one, with the same reason and confidence as the native pipe `|>` (0.85 `local-call` for a same-file definition, 0.5 `global-name-fallback` for a definition in another file without `source()`). A bare stage with no parentheses (`x %>% f`) is an identifier, not a call, and gets no edge. The operator itself is not a callee. Pinned by `R magrittr pipes` in `test/integration/resolvers/r.test.ts`. tidyverse non-standard evaluation (bare column names, `.data$x`) is not modelled.
 - `.Rmd` and `.qmd` files are not indexed (the provider handles `.r` and `.R` only; `.Rprofile` and `.Renviron` are not indexed either), and `box::use()`, `import::from()`, `loadNamespace()`, `attachNamespace()` and `sys.source()` imports are not read.
 - S3 dispatch is not resolved: S3 methods are indexed as functions only. S4 and RefClass dispatch is not resolved either; there are definitions and heritage, not dispatch edges.
 - NAMESPACE `import()`, `importClassesFrom()` and `importMethodsFrom()` create no import edge and bind no name. They are read only as a declared link to a repository package (the dependency rules A and B in Resolution model), and `DESCRIPTION` `Depends:` likewise. Imports of external (CRAN) packages produce no edges.
