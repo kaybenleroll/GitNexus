@@ -755,7 +755,7 @@ describe('R caller attribution', () => {
  * pipe-specific production support; the stages resolve as ordinary calls.
  * The fixture is synthetic (`r-native-pipes/`, three packages); one function per
  * scenario so each assertion is an exact `source -> targets` set.
- * magrittr `%>%` is deliberately NOT covered (no support claimed either way).
+ * magrittr pipes are characterised separately in `R magrittr pipes` at the end of this file.
  * The `pkg::fn` stages are bound by their qualifier, not guessed by name (the cases marked
  * "qualifier flip" differ from a name-only guess).
  */
@@ -1551,5 +1551,63 @@ describe('R golden CALLS edge set (r-packages)', () => {
         'scripts/run_analysis.R:run_analysis.R -> pkgB/R/clean_data.R:CleanData | import-resolved | 0.85',
       ].sort(),
     );
+  });
+});
+
+/**
+ * R magrittr pipes (`%>%`, `%<>%`, `%T>%`, `%$%`): characterisation of the current
+ * behaviour (#80). There is no pipe-specific production support. The stage `f()` in
+ * `x %>% f()` parses as an ordinary call and is linked like any other call; a bare stage
+ * `x %>% f` (no parentheses) is a plain identifier, not a call, and leaves no edge. The
+ * operator itself (`%>%` as a callee) is a separate question (#71) and is not asserted here.
+ * One function per pipe shape so each assertion is an exact `target:reason:confidence` set.
+ * `f` and `g` are defined in another file with no `source()`, so they resolve through the
+ * 0.5 global-name fallback; `local_f` is defined in the calling file (0.85 local-call).
+ */
+describe('R magrittr pipes', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(path.join(FIXTURES, 'r-magrittr-pipes'), () => {});
+  }, 60000);
+
+  /** Sorted `target:reason:confidence` of every CALLS edge from the function `sourceName` in use.R. */
+  const edgesFrom = (sourceName: string): string[] =>
+    getRelationships(result, 'CALLS')
+      .filter((e) => e.source === sourceName && e.sourceFilePath.endsWith('R/use.R'))
+      .map((e) => `${e.target}:${e.rel.reason}:${e.rel.confidence}`)
+      .sort();
+
+  const FALLBACK = (n: string) => `${n}:global-name-fallback:0.5`;
+
+  it('links the stage of `x %>% f()`', () => {
+    expect(edgesFrom('paren_user')).toEqual([FALLBACK('f')]);
+  });
+
+  it('leaves no edge for a bare stage `x %>% f` (an identifier, not a call)', () => {
+    expect(edgesFrom('bare_user')).toEqual([]);
+  });
+
+  it('links both stages of a two-step chain `x %>% g() %>% f()`', () => {
+    expect(edgesFrom('chain_user')).toEqual([FALLBACK('f'), FALLBACK('g')]);
+  });
+
+  it('links the stage of `%<>%`, `%T>%` and `%$%`', () => {
+    expect(edgesFrom('assign_user')).toEqual([FALLBACK('f')]);
+    expect(edgesFrom('tee_user')).toEqual([FALLBACK('f')]);
+    expect(edgesFrom('expose_user')).toEqual([FALLBACK('f')]);
+  });
+
+  it('gives the `|>` control the same edge as `%>%`', () => {
+    expect(edgesFrom('native_user')).toEqual(edgesFrom('paren_user'));
+  });
+
+  it('links a same-file stage at the 0.85 local-call tier, and a bare one not at all', () => {
+    expect(edgesFrom('local_user')).toEqual(['local_f:local-call:0.85']);
+    expect(edgesFrom('local_bare_user')).toEqual([]);
+  });
+
+  it('adds no edge for a base-R call (control)', () => {
+    expect(edgesFrom('base_user')).toEqual([]);
   });
 });
