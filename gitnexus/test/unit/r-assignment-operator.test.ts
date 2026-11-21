@@ -118,11 +118,19 @@ describe('R queries: only an assignment declares a definition', () => {
       // alternative in a value list, not an anchor.
       const patterns = text.split(/^\(binary_operator\n/m).slice(1);
       expect(patterns.length, label).toBeGreaterThan(0);
-      for (const body of patterns) {
+      // The one pattern that is not an assignment is the infix call `a %op% b` in the scope query.
+      // It is pinned exactly, so a declaration or scope capture added to it fails here.
+      const INFIX_PATTERN = 'operator: "special" @reference.name) @reference.call.free';
+      const isInfixCall = (body: string) => body.split('\n\n')[0].includes('operator: "special"');
+      for (const body of patterns.filter(isInfixCall)) {
+        expect(body.split('\n\n')[0].trim(), label).toBe(INFIX_PATTERN);
+      }
+      for (const body of patterns.filter((b) => !isInfixCall(b))) {
         expect(body.split('\n\n')[0], `${label}: ${body.slice(0, 60)}`).toContain(
           'operator: ["<-" "<<-" "="]',
         );
       }
+      expect(patterns.filter(isInfixCall).length, label).toBe(label === 'R_SCOPE_QUERY' ? 1 : 0);
     }
   });
 });

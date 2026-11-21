@@ -7,7 +7,12 @@ import { MAX_CHAIN_DEPTH } from '../../utils/call-analysis.js';
 import { encodeReceiverChain } from '../../utils/receiver-chain-codec.js';
 import { getTreeSitterBufferSize } from '../../constants.js';
 import { parseSourceSafe } from '../../../tree-sitter/safe-parse.js';
-import { collectRFrameNames, rReplacementCallTest, rSetterName } from './assignment.js';
+import {
+  assignmentTarget,
+  collectRFrameNames,
+  rReplacementCallTest,
+  rSetterName,
+} from './assignment.js';
 import { rConstructorAnchorTest } from './receiver-agreement.js';
 import {
   createSelfOwnerClassifier,
@@ -95,7 +100,11 @@ export function emitRScopeCaptures(
     // Dropping the type leaves the receiver untyped, and an untyped receiver gets no edge: the
     // call is unresolved, never bound to another class's method.
     if (constructorAnchor !== undefined && !isAgreedConstructor(constructorAnchor)) continue;
-    if (freeCallNode !== undefined && isReplacementCall(freeCallNode)) {
+    // `x %op% y <- v` calls `%op%<-`, not `%op%`: no site, as a setter is not minted for it either.
+    if (freeCallNode?.type === 'binary_operator' && isAssignmentTarget(freeCallNode)) continue;
+    if (freeCallNode?.type === 'binary_operator') {
+      recordAsInfixCall(grouped, freeCallNode);
+    } else if (freeCallNode !== undefined && isReplacementCall(freeCallNode)) {
       recordAsSetterCall(grouped, freeCallNode);
     }
     // A member call whose receiver is itself a `$` access or a call (`a$b$m()`): mint the
@@ -216,6 +225,34 @@ export function rReceiverChain(receiverNode: SyntaxNode): string | undefined {
     node = lhs;
   }
   return undefined;
+}
+
+/** Whether `node` is the target of an assignment: the left of `<-`, `=`, `<<-`, the right of `->`, `->>`. */
+function isAssignmentTarget(node: SyntaxNode): boolean {
+  const parent = node.parent;
+  return parent !== null && assignmentTarget(parent)?.id === node.id;
+}
+
+/**
+ * Names the call that an infix expression `a %op% b` makes: the operator token spelled as the
+ * definition spells it, in backticks (`` `%op%` ``). R can only define such a function through a
+ * backticked or quoted name, and the graph keeps the definition's name as written (see
+ * `bare-name.ts`), so the site matches the backticked binding. Only the name keeps the operator's
+ * range: the `@reference.call.free` anchor is the whole expression, so it starts at the left-hand
+ * side (`foo(x) %||% 1` anchors at `foo`, and `foo(x)` is also a call site of its own). An
+ * expression that is itself the target of an assignment (`a %op% b <- v`) never reaches here: R
+ * calls `` `%op%<-` `` there, so the caller mints no site for it.
+ *
+ * An operator token is `%...%` and cannot begin with a backtick, so no `rBareName` is needed.
+ */
+function recordAsInfixCall(grouped: Record<string, Capture>, expression: SyntaxNode): void {
+  const operator = expression.childForFieldName('operator');
+  if (operator === null) return;
+  grouped['@reference.name'] = syntheticCapture(
+    '@reference.name',
+    operator,
+    '`' + operator.text + '`',
+  );
 }
 
 /**
