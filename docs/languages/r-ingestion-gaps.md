@@ -115,7 +115,7 @@ change.
 These rows were found while fixing the findings of the audit above. Rows R-26 to R-31 and R-33 were
 measured in the audit and are not pinned by a repo test; the others are pinned by the named tests,
 including the fixes for R-45 to R-48 from the upstream review. R-49 remains measured
-behaviour without a regression test.
+behaviour without a regression test. R-50 is shared-core behaviour pinned from R.
 
 | ID | Evidence | Gap or boundary | Pinned by | To close |
 | -- | -- | -- | -- | -- |
@@ -143,6 +143,7 @@ behaviour without a regression test.
 | R-47 | Fixed | An unreadable NAMESPACE leaves exports unknown. Uncertain or duplicate package names cannot supply a qualified import. | `r-manifest-read-limits.test.ts`, `r-package-discovery-order.test.ts` | Closed |
 | R-48 | Fixed | The reader handles quoted directive heads. Unsupported TRE escapes and locale-dependent POSIX matches leave privacy unproven and block rename. | `r-namespace-exports.test.ts`, `r-rename-namespace-export.test.ts` | Closed |
 | R-49 | Measured gap | Post-parse export refinement tags by bare name (`post-parse.ts`): a method, field or nested function named like an export reads `exported=true`, and a public R6 method whose name is not in the NAMESPACE reads `exported=false`. Nested functions are still marked exported (not changed in #115). The refinement writes the graph node's `isExported` only (`languages/r/post-parse.ts`); entry-point scoring and process detection read that node flag (`process-processor.ts` passes `node.properties.isExported` to the scorer), while scope resolution reads a separate per-definition flag that this refinement does not touch. | Unpinned | Tag only top-level definitions of `R/` files; leave members and nested functions to their own rule. |
+| R-50 | Recorded boundary (outside R) | The ingestion integrity receipt counts `collapsedIdentity` for every R free-call `CALLS` edge, for example one per `r-s4-generator` cell. This is not a node collision. The shared free-call pass emits one edge per caller and target pair, so the edge id has no source span and the check reports it as unverified. An S4 generator (`Circle <- setClass(...)`) and a same-named constructor function stay two nodes, a `Class` and a `Function`. The count equals the number of free-call edges and falls to zero only if the shared pass keeps a site span. | `r-s4-generator.test.ts` (receipt count per cell; separate `Class` and `Function` nodes) | None in R code; the identity is set by shared code. |
 
 ## Code and regression entry points
 
