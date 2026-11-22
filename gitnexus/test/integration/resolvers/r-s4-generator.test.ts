@@ -12,11 +12,22 @@
  *   the same name. `b.R` is loaded later and wins, so the 0.5 edge to `b.R` is right. This is why
  *   no rule vetoes a plain function that shares its name with a generator.
  *
+ * - The ingestion integrity check reports `collapsedIdentity` for every CALLS edge here. That is
+ *   not a node collision: a free call is emitted once per caller and target pair, so its edge id
+ *   carries no source span and the check cannot verify one. The generator and the constructor
+ *   function stay two nodes (a `Class` and a `Function`).
+ *
  * Fixtures under `r-s4-generator/`, one repository each.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import path from 'path';
-import { FIXTURES, getRelationships, runPipelineFromRepo, type PipelineResult } from './helpers.js';
+import {
+  FIXTURES,
+  getNodesByLabel,
+  getRelationships,
+  runPipelineFromRepo,
+  type PipelineResult,
+} from './helpers.js';
 
 beforeAll(() => vi.stubEnv('GITNEXUS_WORKER_READY_TIMEOUT_MS', '60000'));
 afterAll(() => vi.unstubAllEnvs());
@@ -74,4 +85,45 @@ describe.each(Object.entries(CASES))('R S4 generator calls: %s', (fixture, expec
     for (const targets of Object.values(actual)) targets.sort();
     expect(actual).toEqual(expected);
   });
+});
+
+describe.each(Object.entries(CASES))(
+  'R S4 generator integrity receipt: %s',
+  (fixture, expected) => {
+    let result: PipelineResult;
+    beforeAll(async () => {
+      result = await runPipelineFromRepo(path.join(FIXTURES, 'r-s4-generator', fixture), () => {});
+    }, 120000);
+
+    it('counts each CALLS edge as one span-less free-call edge, not a node collision', () => {
+      const calls = getRelationships(result, 'CALLS');
+      const expectedCount = Object.values(expected).reduce((n, targets) => n + targets.length, 0);
+      expect(calls).toHaveLength(expectedCount);
+      for (const e of calls) {
+        expect(e.rel.id).toBe(`rel:CALLS:${e.rel.sourceId}->${e.rel.targetId}`);
+      }
+      // Aggregated caller/target identity is the only unverified reason: no edge is point-only.
+      expect(result.relationshipIntegrity).toMatchObject({
+        checkedSites: 0,
+        unverifiedEdges: expectedCount,
+      });
+    });
+  },
+);
+
+describe('R S4 generator and same-named constructor keep separate nodes', () => {
+  it.each(['same-file-library', 'same-file-classfirst-library'])(
+    '%s: one Class and one Function named Circle',
+    async (fixture) => {
+      const result = await runPipelineFromRepo(
+        path.join(FIXTURES, 'r-s4-generator', fixture),
+        () => {},
+      );
+      const classes = getNodesByLabel(result, 'Class').filter((n) => n.endsWith('Circle'));
+      const functions = getNodesByLabel(result, 'Function').filter((n) => n.endsWith('Circle'));
+      expect(classes).toHaveLength(1);
+      expect(functions).toHaveLength(1);
+    },
+    120000,
+  );
 });
