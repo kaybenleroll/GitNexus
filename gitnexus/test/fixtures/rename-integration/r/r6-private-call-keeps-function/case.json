@@ -1,0 +1,15 @@
+{
+  "language": "r",
+  "description": "Rename a plain function while an R6 method calls a private method of the same name through private$: that call reaches the private method, not the function, so it is left alone.",
+  "categories": ["r6", "receiver", "same-file"],
+  "target": { "name": "helper", "kind": "Function", "file": "a.R", "startLine": 0 },
+  "newName": "assist",
+  "expect": { "status": "success", "edits": 2 },
+  "edges": [
+    {
+      "type": "CALLS",
+      "from": { "name": "run_free", "kind": "Function", "file": "a.R", "startLine": 2 },
+      "to": { "name": "helper", "kind": "Function", "file": "a.R", "startLine": 0 }
+    }
+  ]
+}

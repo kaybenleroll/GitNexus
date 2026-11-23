@@ -1,0 +1,9 @@
+{
+  "language": "r",
+  "description": "Refuse when super$helper() sits in a class with no parent that defines helper: the call finds no member and is a suppressed, ambiguous site. It never reaches the free function, but the provider records no proof of that, so the rename is blocked rather than guessed.",
+  "categories": ["r6", "receiver", "negative", "unchanged-on-error"],
+  "target": { "name": "helper", "kind": "Function", "file": "a.R", "startLine": 0 },
+  "newName": "assist",
+  "expect": { "status": "error", "code": "ambiguous_reference", "planningStatus": "blocked" },
+  "edges": []
+}

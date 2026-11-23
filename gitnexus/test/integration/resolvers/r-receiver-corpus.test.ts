@@ -14,7 +14,7 @@
  *   - `resolves`: the exact target, at the receiver-call confidence;
  *   - `unresolved`: no edge on purpose, with the outcome that says why (the `impact` lower bound);
  *   - `deferred`: no edge because the feature is not built (roxygen types, receiver propagation,
- *     chains without a variable base, `super$` / `private$`). A row is `deferred` when the shape
+ *     chains without a variable base). A row is `deferred` when the shape
  *     could resolve one day; its absence is pinned so a change shows up here. Where the result is
  *     INVISIBLE (no edge and no counted drop), the row says so.
  *
@@ -271,22 +271,20 @@ const RECEIVER_CELLS: readonly Cell[] = [
     file: M,
     caller: 'super_call',
     site: 'super$greet()',
-    target: null,
+    target: 'Method:R/models.R:Base.greet#0',
     outcome: 'none',
-    kind: 'deferred',
-    control: 'self_inherited',
-    note: 'nothing binds super to the parent class; Base.greet and the free greet() are not reached',
+    kind: 'resolves',
+    note: 'super is the parent chain of the enclosing class; the free greet() is not reached',
   },
   {
     shape: 'private$secret()',
     file: M,
     caller: 'private_call',
     site: 'private$secret()',
-    target: null,
+    target: 'Method:R/models.R:Child.secret#0',
     outcome: 'none',
-    kind: 'deferred',
-    control: 'self_own',
-    note: 'nothing binds private to the class; Child.secret is not reached',
+    kind: 'resolves',
+    note: 'private is the private list of the enclosing class, which self$ never reads',
   },
   {
     shape: 'RefClass: log_bare(x) in a method, a sibling method by bare name',

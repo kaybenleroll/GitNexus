@@ -299,9 +299,10 @@ export const rScopeResolver: ScopeResolver = {
   // Restores which R6 members are private for a file reused from a worker or the parse cache.
   applyCaptureSideChannel: applyRCaptureSideChannel,
 
-  // R6's `super$method()` is not resolved: nothing binds `super` to the parent class, so there
-  // is no receiver type to walk from. Off, rather than answering a wrong parent. (`self` is
-  // bound, to the enclosing class, by `emitRScopeCaptures`; `private$` is not.)
+  // R6's `super$m()` does not use the shared super branch. That branch records no outcome for a
+  // class with no indexed parent or a missing member, and it cannot tell a `super` the function
+  // binds itself. Instead `emitRScopeCaptures` types `super` and `private` as the enclosing class,
+  // like `self`, and `rResolveSelfMember` reads the members by the receiver's name.
   isSuperReceiver: () => false,
 
   // R's dynamic-dispatch `self$field$method()` chains and R6/S4 field access

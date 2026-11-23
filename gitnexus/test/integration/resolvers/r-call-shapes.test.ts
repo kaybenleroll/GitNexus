@@ -54,7 +54,9 @@ describe('R: positive controls of the call-shape fixture', () => {
     expect(calls).toEqual([
       'attached_user -> helper',
       'direct_call -> helper',
+      'greet -> greet',
       'inherited -> describe_it',
+      'ping -> secret',
       'shout -> greet',
       'up -> climb_up',
       'use_area -> area',
@@ -111,10 +113,15 @@ describe('R6: dispatch and heritage', () => {
     expect(edge.rel.confidence).toBeCloseTo(0.85, 5);
   });
 
-  it('creates no edge for super$method() or private$method()', () => {
+  it('binds super$method() to the parent method and private$method() to the own private one', () => {
     // Child$greet overrides Parent$greet and calls super$greet(); Child$ping calls private$secret().
-    expect(callsFrom('greet').filter((e) => e.sourceFilePath === 'R/child.R')).toEqual([]);
-    expect(callsFrom('ping')).toEqual([]);
+    const greet = callsFrom('greet').filter((e) => e.sourceFilePath === 'R/child.R');
+    expect(greet.map((e) => e.rel.targetId)).toEqual(['Method:R/parent.R:Parent.greet#0']);
+    expect(greet[0].rel.reason).toBe('import-resolved');
+    expect(greet[0].rel.confidence).toBeCloseTo(0.85, 5);
+    expect(callsFrom('ping').map((e) => e.rel.targetId)).toEqual([
+      'Method:R/child.R:Child.secret#0',
+    ]);
   });
 
   it('binds an inherited self$method() to the parent method, not to a top-level function of that name', () => {

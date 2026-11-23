@@ -21,6 +21,13 @@ import { definitionIdPosition } from '../../scope-resolution/utils/definition-id
 import { assertCloneable } from '../../workers/clone-safety.js';
 import { isRLeftAssignment, rBoundName } from './assignment.js';
 
+type MemberResolver = NonNullable<ScopeResolver['resolveReceiverMember']>;
+type MemberParams = Parameters<MemberResolver>;
+type MemberResolution = NonNullable<ReturnType<MemberResolver>>;
+
+/** The names an R6 method binds to its class: `self`, and `super` and `private` as lenses on it. */
+export const R6_BOUND_RECEIVERS: readonly string[] = ['self', 'super', 'private'];
+
 const R6_SECTIONS: ReadonlySet<string> = new Set(['public', 'private', 'active']);
 
 /** The section name of an `argument` node (`public = list(...)`), or null. */
@@ -101,6 +108,41 @@ export function fileBindsSelf(program: SyntaxNode): boolean {
     if (child !== null && rBoundName(child) === 'self') return true;
   }
   return false;
+}
+
+/**
+ * Whether `fn` itself binds `name` by a plain assignment of any value (`super <- NULL`,
+ * `NULL -> private`), outside the functions nested in it. The lexical names of a frame leave out
+ * a value that cannot be a function (a constant, `NULL`), which is right for a call of the name
+ * but not for a receiver: `private$m()` after `private <- NULL` reads that variable, not the
+ * method's own `private`.
+ */
+export function rFunctionAssignsName(fn: SyntaxNode, name: string): boolean {
+  const pending = [fn.childForFieldName('body')];
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    if (node === null || node.type === 'function_definition') continue;
+    if (node.type === 'binary_operator') {
+      const operator = node.childForFieldName('operator')?.text;
+      const target =
+        operator === '<-' || operator === '='
+          ? node.childForFieldName('lhs')
+          : operator === '->'
+            ? node.childForFieldName('rhs')
+            : null;
+      if (target?.type === 'identifier' && target.text === name) return true;
+    }
+    for (const child of node.namedChildren) pending.push(child);
+  }
+  return false;
+}
+
+/**
+ * Whether `fn` (nested functions included, as closures read the enclosing binding) mentions the
+ * identifier `name` anywhere. A method that never writes `super` or `private` has no use for the
+ * binding of that name, so the capture pass skips it.
+ */
+export function rFunctionMentionsName(fn: SyntaxNode, name: string): boolean {
+  return fn.descendantsOfType('identifier').some((node) => node.text === name);
 }
 
 /**
@@ -199,7 +241,59 @@ function isRR6PrivateMember(def: SymbolDefinition): boolean {
  * be more exact. A member found before any private one was skipped is left to the generic MRO walk
  * (`undefined`), which finds the same one; past a skipped private member the answer is given here,
  * because that walk would stop at it.
+ *
+ * Inside an R6 method `super$m()` and `private$m()` are typed as the class too, and read the
+ * members differently (`resolveR6LensMember`): `private` is the class's own private members and
+ * nothing inherited; `super` is the parents' members, private ones included, nearest parent first,
+ * and never the class's own.
  */
+
+/** The receiver's lens when its binding is the R6 method's own (`super`, `private`), else null. */
+function r6Lens(site: MemberParams[2], scopes: MemberParams[3]): 'super' | 'private' | null {
+  const receiver = site.explicitReceiver?.name;
+  if (receiver !== 'super' && receiver !== 'private') return null;
+  // A binding typed any other way (`private <- Foo$new()`) is an ordinary typed receiver.
+  let scopeId: string | null = site.inScope;
+  while (scopeId !== null) {
+    const scope = scopes.scopeTree.getScope(scopeId);
+    if (scope === undefined) return null;
+    const binding = scope.typeBindings.get(receiver);
+    if (binding !== undefined) return binding.source === 'self' ? receiver : null;
+    scopeId = scope.parent;
+  }
+  return null;
+}
+
+/**
+ * `super$m()` and `private$m()` read from `owner`, the enclosing class. A lookup that finds no
+ * member answers `ambiguous` with no candidate, which records an outcome and stops the fallbacks
+ * that would reach a free function of that name.
+ */
+function resolveR6LensMember(
+  lens: 'super' | 'private',
+  owner: SymbolDefinition,
+  name: string,
+  scopes: MemberParams[3],
+  model: MemberParams[4],
+): MemberResolution {
+  const owners = lens === 'private' ? [owner.nodeId] : scopes.methodDispatch.mroFor(owner.nodeId);
+  for (const ownerId of owners) {
+    const own = model.methods.lookupAllByOwner(ownerId, name);
+    const methods = lens === 'private' ? own.filter(isRR6PrivateMember) : own;
+    if (methods.length > 0) {
+      const [only] = methods;
+      return methods.length === 1 && only !== undefined
+        ? { kind: 'resolved', definition: only }
+        : { kind: 'ambiguous', candidateIds: methods.map((def) => def.nodeId) };
+    }
+    // A field of the name is not callable here; it ends the walk like a method would.
+    if (model.fields.lookupAllByOwner(ownerId, name).length > 0) {
+      return { kind: 'ambiguous', candidateIds: [] };
+    }
+  }
+  return { kind: 'ambiguous', candidateIds: [] };
+}
+
 export const rResolveSelfMember: NonNullable<ScopeResolver['resolveReceiverMember']> = (
   owner,
   name,
@@ -208,6 +302,8 @@ export const rResolveSelfMember: NonNullable<ScopeResolver['resolveReceiverMembe
   model,
 ) => {
   if (site.kind !== 'call') return undefined;
+  const lens = r6Lens(site, scopes);
+  if (lens !== null) return resolveR6LensMember(lens, owner, name, scopes, model);
   let skippedPrivate = false;
   for (const ownerId of [owner.nodeId, ...scopes.methodDispatch.mroFor(owner.nodeId)]) {
     const methods = model.methods.lookupAllByOwner(ownerId, name);

@@ -14,7 +14,7 @@ import {
 // see scripts/cross-platform-tests.ts).
 describe('R rename fixtures', () => {
   it('are all discovered', () => {
-    expect(renameCases.filter((fixture) => fixture.language === 'r')).toHaveLength(117);
+    expect(renameCases.filter((fixture) => fixture.language === 'r')).toHaveLength(119);
   });
 
   it('split into five balanced parts, each fixture in exactly one', () => {
@@ -23,7 +23,7 @@ describe('R rename fixtures', () => {
     const counts = [1, 2, 3, 4, 5].map(
       (part) => ids.filter((id) => renameFixturePart(id) === part).length,
     );
-    expect(counts).toEqual([24, 24, 23, 23, 23]);
+    expect(counts).toEqual([24, 24, 24, 24, 23]);
     expect(counts.reduce((sum, count) => sum + count, 0)).toBe(ids.length);
   });
 });
