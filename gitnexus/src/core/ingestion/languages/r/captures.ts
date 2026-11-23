@@ -14,6 +14,9 @@ import {
   fileBindsSelf,
   rDefinitionPositionKey,
   recordRR6PrivateMembers,
+  R6_BOUND_RECEIVERS,
+  rFunctionAssignsName,
+  rFunctionMentionsName,
   rR6Method,
 } from './r6-self.js';
 
@@ -121,16 +124,25 @@ export function emitRScopeCaptures(
       // A function that binds `self` itself (`self <- other()`, a formal or loop variable called
       // `self`) owns it, R6 method or not: the method's typed `self` is no longer the receiver
       // there, so `self$m()` is unresolved unless that binding is typed (`self <- Foo$new()`).
+      // `super` and `private` are the same: a function that binds either owns it untyped.
+      const owned: string[] = [];
       if (names.includes('self') || (!bindsSelf && functionOwnsSelf(functionNode))) {
+        owned.push('self');
+      }
+      for (const name of R6_BOUND_RECEIVERS) {
+        if (name !== 'self' && (names.includes(name) || rFunctionAssignsName(functionNode, name)))
+          owned.push(name);
+      }
+      if (owned.length > 0) {
         grouped['@receiver-owner.self'] = syntheticCapture(
           '@receiver-owner.self',
           functionNode,
-          'self',
+          owned.join(','),
         );
       }
     }
     out.push(grouped);
-    // An R6 method types `self` as its class. The binding is anchored on the method's name, so it
+    // An R6 method types `self`, `super` and `private` as its class. The binding is anchored on the method's name, so it
     // lands in the method's own scope (an anchor that spans the whole scope would hoist it to the
     // class scope, which every method of the class shares).
     if (methodNode !== undefined && !typedMethods.has(methodNode.id)) {
@@ -138,15 +150,27 @@ export function emitRScopeCaptures(
       const method = rR6Method(methodNode);
       const methodName = methodNode.childForFieldName('name');
       if (method !== null && methodName !== null) {
-        out.push({
-          '@type-binding.self': syntheticCapture('@type-binding.self', methodName, 'self'),
-          '@type-binding.name': syntheticCapture('@type-binding.name', methodName, 'self'),
-          '@type-binding.type': syntheticCapture(
-            '@type-binding.type',
-            methodName,
-            method.className,
-          ),
-        });
+        // `super` and `private` are the same instance read through another lens (the parents'
+        // members, the class's own private members): `rResolveSelfMember` tells them apart by the
+        // receiver's name.
+        // Only a method that mentions `super` or `private` gets that binding; `self` is always bound.
+        const methodFunction = methodNode.childForFieldName('value');
+        for (const receiver of R6_BOUND_RECEIVERS) {
+          if (
+            receiver !== 'self' &&
+            (methodFunction === null || !rFunctionMentionsName(methodFunction, receiver))
+          )
+            continue;
+          out.push({
+            '@type-binding.self': syntheticCapture('@type-binding.self', methodName, receiver),
+            '@type-binding.name': syntheticCapture('@type-binding.name', methodName, receiver),
+            '@type-binding.type': syntheticCapture(
+              '@type-binding.type',
+              methodName,
+              method.className,
+            ),
+          });
+        }
         // The method's definition is anchored on this same `argument` node.
         if (method.section === 'private') privateMembers.add(rDefinitionPositionKey(methodNode));
       }
@@ -255,12 +279,15 @@ export function rFunctionLexicalNames(fn: SyntaxNode, blockScopes?: ReadonlySet<
 /**
  * `LanguageProvider.scopeOwnsReceivers` for R: the module scope, each function frame that is
  * not an R6 method (and not nested in a function), and any function that binds `self` itself
- * (`self <- other()`, a formal called `self`) bind `self` with no type of their own, which makes
+ * (`self <- other()`, a formal called `self`) bind `self` with no type of their own (a function
+ * that binds `super` or `private` owns that name the same way), which makes
  * a `self$m()` call there a definitive negative unless that binding is typed. The tag is written by
  * `emitRScopeCaptures`, where the tree is at hand.
  */
 const R_SELF_OWNER: ReadonlySet<string> = Object.freeze(new Set(['self']));
 
 export function rScopeOwnsReceivers(match: CaptureMatch): ReadonlySet<string> | undefined {
-  return match['@receiver-owner.self'] !== undefined ? R_SELF_OWNER : undefined;
+  const tag = match['@receiver-owner.self'];
+  if (tag === undefined) return undefined;
+  return tag.text === 'self' ? R_SELF_OWNER : new Set(tag.text.split(','));
 }

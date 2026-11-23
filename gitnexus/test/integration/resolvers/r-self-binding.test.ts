@@ -13,7 +13,8 @@
  *   - c3  the class's own method, with a decoy
  *   - c4  self$m() where no class in the chain defines m, with a decoy
  *   - c5  inherited method, parent in another file, decoy in a third file
- *   - c6/c7/c8  private$m(), super$m() and obj$m() with decoys: no edge
+ *   - c6/c7/c8  private$m() of a parent's private method (no edge), super$m() and obj$m() with
+ *     decoys; super$ and private$ are covered in r-r6-super-private.test.ts
  *   - c9  a free function, a parameter named self, a closure in a method, a missing method
  *   - c10 an R6Class call that is not assigned, a RefClass method
  *   - c11 the argument count differs from the method's formals
@@ -174,11 +175,24 @@ describe('R6 self$method() with a dotted class name gets no receiver lookup', ()
   });
 });
 
+describe('R6 super$ and private$ bind the enclosing class, not a free function', () => {
+  it('c7 super$greet() reaches the parent method, past the free decoy', () => {
+    expect(callsFrom('c7_greet', 'R/c6_c7_c8.R')).toEqual([
+      'Method:R/c6_c7_c8.R:C6Base.c7_greet#0:global:0.85',
+    ]);
+  });
+
+  it("c15 private$m() reaches the class's own private method", () => {
+    expect(callsFrom('c15_priv_mine', 'R/c15.R')).toEqual([
+      'Method:R/c15.R:C15Child.c15_mine#0:global:0.85',
+    ]);
+  });
+});
+
 describe('R6 self$method() never reaches a free function', () => {
   it.each([
     ['c4 no such method, decoy', 'c4_run', 'R/c4.R'],
     ['c6 private$secret() with a decoy', 'c6_run', 'R/c6_c7_c8.R'],
-    ['c7 super$greet()', 'c7_greet', 'R/c6_c7_c8.R'],
     ['c8 obj$greet() with a decoy', 'c8_use', 'R/c6_c7_c8.R'],
     ['c9 a free function using self', 'c9_free', 'R/c9.R'],
     ['c9 a parameter named self', 'c9_param', 'R/c9.R'],
@@ -186,7 +200,6 @@ describe('R6 self$method() never reaches a free function', () => {
     ['c14 self$x <- v, then a method that does not exist', 'c14_run_missing', 'R/c14.R'],
     ['c15 a private parent method through self', 'c15_call_hidden', 'R/c15.R'],
     ['c15 a private own method through self', 'c15_call_mine', 'R/c15.R'],
-    ['c15 private$m() (private$ is not modelled)', 'c15_priv_mine', 'R/c15.R'],
     ['c16 a parent field and a child private method share the name', 'c16_call', 'R/c16.R'],
   ])('%s: no edge', (_label, source, file) => {
     expect(callsFrom(source, file)).toEqual([]);
