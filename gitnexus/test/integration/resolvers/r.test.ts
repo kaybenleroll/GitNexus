@@ -1555,11 +1555,11 @@ describe('R golden CALLS edge set (r-packages)', () => {
 });
 
 /**
- * R magrittr pipes (`%>%`, `%<>%`, `%T>%`, `%$%`): characterisation of the current
- * behaviour (#80). There is no pipe-specific production support. The stage `f()` in
- * `x %>% f()` parses as an ordinary call and is linked like any other call; a bare stage
- * `x %>% f` (no parentheses) is a plain identifier, not a call, and leaves no edge. The
- * operator itself (`%>%` as a callee) is a separate question (#71) and is not asserted here.
+ * R magrittr pipes (`%>%`, `%<>%`, `%T>%`, `%$%`). The stage `f()` in `x %>% f()` parses as an
+ * ordinary call and is linked like any other call. A bare stage `x %>% f` (no parentheses) is an
+ * identifier, so a pipe-specific query pattern mints a call site for it; a non-pipe infix such as
+ * `x %in% f` does not call its right-hand side. The operator itself is a free call of the
+ * function of that name (see the infix operator tests) and is not asserted here.
  * One function per pipe shape so each assertion is an exact `target:reason:confidence` set.
  * `f` and `g` are defined in another file with no `source()`, so they resolve through the
  * 0.5 global-name fallback; `local_f` is defined in the calling file (0.85 local-call).
@@ -1584,8 +1584,35 @@ describe('R magrittr pipes', () => {
     expect(edgesFrom('paren_user')).toEqual([FALLBACK('f')]);
   });
 
-  it('leaves no edge for a bare stage `x %>% f` (an identifier, not a call)', () => {
-    expect(edgesFrom('bare_user')).toEqual([]);
+  it('links a bare stage `x %>% f` (an identifier) like the parenthesised form', () => {
+    expect(edgesFrom('bare_user')).toEqual([FALLBACK('f')]);
+    expect(edgesFrom('bare_user')).toEqual(edgesFrom('paren_user'));
+  });
+
+  it('links every bare stage of a chain, and a bare stage after a parenthesised one', () => {
+    expect(edgesFrom('bare_chain_user')).toEqual([FALLBACK('f'), FALLBACK('g')]);
+    expect(edgesFrom('bare_mixed_user')).toEqual([FALLBACK('f'), FALLBACK('g')]);
+  });
+
+  it('links a bare stage after `%<>%`, `%T>%` and `%$%`', () => {
+    expect(edgesFrom('bare_assign_user')).toEqual([FALLBACK('f')]);
+    expect(edgesFrom('bare_tee_user')).toEqual([FALLBACK('f')]);
+    expect(edgesFrom('bare_expose_user')).toEqual([FALLBACK('f')]);
+  });
+
+  it('makes no duplicate edge for the parenthesised form', () => {
+    const edges = getRelationships(result, 'CALLS').filter(
+      (e) => e.source === 'paren_user' && e.sourceFilePath.endsWith('R/use.R'),
+    );
+    expect(edges).toHaveLength(1);
+  });
+
+  it('gives a non-pipe infix operator no edge to its right-hand side', () => {
+    expect(edgesFrom('in_user')).toEqual([]);
+  });
+
+  it('leaves a stage that is not a plain identifier (`pkg$f`) unlinked', () => {
+    expect(edgesFrom('member_stage_user')).toEqual([]);
   });
 
   it('links both stages of a two-step chain `x %>% g() %>% f()`', () => {
@@ -1602,9 +1629,9 @@ describe('R magrittr pipes', () => {
     expect(edgesFrom('native_user')).toEqual(edgesFrom('paren_user'));
   });
 
-  it('links a same-file stage at the 0.85 local-call tier, and a bare one not at all', () => {
+  it('links a same-file stage, bare or not, at the 0.85 local-call tier', () => {
     expect(edgesFrom('local_user')).toEqual(['local_f:local-call:0.85']);
-    expect(edgesFrom('local_bare_user')).toEqual([]);
+    expect(edgesFrom('local_bare_user')).toEqual(['local_f:local-call:0.85']);
   });
 
   it('adds no edge for a base-R call (control)', () => {

@@ -19,9 +19,9 @@ describe('R infix operator call sites', () => {
   });
 
   it('mints a site for every %...% operator, base operators and the pipe included', () => {
-    const names = freeCalls('a %in% b; a %o% b; a %*% b; a %% b; a %/% b; a %>% b').map(
-      (s) => s.split(' @ ')[0],
-    );
+    const names = freeCalls('a %in% b; a %o% b; a %*% b; a %% b; a %/% b; a %>% b')
+      .map((s) => s.split(' @ ')[0])
+      .filter((name) => name.startsWith('`'));
     expect(names).toEqual(['`%in%`', '`%o%`', '`%*%`', '`%%`', '`%/%`', '`%>%`']);
   });
 
@@ -72,5 +72,33 @@ describe('R infix operator call sites', () => {
     expect(freeCalls(source)).toHaveLength(2000);
     // Measured at about 75 ms here; the text kept per site is quadratic in the chain but small.
     expect(performance.now() - start).toBeLessThan(5000);
+  });
+});
+
+describe('R bare magrittr stage call sites', () => {
+  it.each(['%>%', '%<>%', '%T>%', '%$%'])('mints a call site for the bare stage of %s', (op) => {
+    expect(freeCalls(`x ${op} f`)).toContain('f @ f');
+  });
+
+  it('anchors the site on the stage identifier, next to the operator site', () => {
+    expect(freeCalls('x %>% f')).toEqual(['`%>%` @ x %>% f', 'f @ f']);
+  });
+
+  it('mints a site for every bare stage of a chain', () => {
+    expect(freeCalls('x %>% g %>% f').filter((s) => !s.startsWith('`'))).toEqual([
+      'g @ g',
+      'f @ f',
+    ]);
+  });
+
+  it('mints no extra site for a stage written as a call', () => {
+    expect(freeCalls('x %>% f()').filter((s) => !s.startsWith('`'))).toEqual(['f @ f()']);
+  });
+
+  it('mints none for a non-pipe operator or a non-identifier stage, and none for the left operand', () => {
+    const named = (source: string) => freeCalls(source).filter((s) => !s.startsWith('`'));
+    expect(named('a %in% b; a %o% b; a %||% b')).toEqual([]);
+    expect(named('x %>% pkg$f; x %>% pkg::f; x %>% (f)')).toEqual([]);
+    expect(named('f %>% x')).toEqual(['x @ x']);
   });
 });

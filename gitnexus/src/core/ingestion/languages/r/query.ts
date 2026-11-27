@@ -377,6 +377,16 @@ export const R_SCOPE_QUERY = `
 (binary_operator
   operator: "special" @reference.name) @reference.call.free
 
+;; Bare magrittr stage: in x %>% f the stage f is an identifier, not a call, so the free-call
+;; pattern above never sees it. The identifier is both the name and the anchor, so the site is
+;; one call of f (a stage written f() is a call and is matched above, not here). Pipes only:
+;; a %in% b does not call b. %$% reads a bare name from its left-hand side's data, so a stage
+;; there may be a column, not a function.
+(binary_operator
+  operator: "special" @_pipe
+  (#match? @_pipe "^%(>|<>|T>|[$])%$")
+  rhs: (identifier) @reference.name @reference.call.free)
+
 ;; Namespaced calls: pkg::func() and pkg:::func(). The whole namespace_operator
 ;; is captured as the qualified name so the qualifier survives the parse cache.
 (call
