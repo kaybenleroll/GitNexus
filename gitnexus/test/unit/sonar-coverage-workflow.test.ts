@@ -9,10 +9,12 @@ type Step = {
   name?: string;
   run?: string;
   if?: string;
+  shell?: string;
+  env?: Record<string, string>;
   with?: Record<string, string>;
   'continue-on-error'?: boolean;
 };
-type Job = { if?: string; steps?: Step[] };
+type Job = { if?: string; steps?: Step[]; needs?: string[] };
 
 function readWorkflow(name: string) {
   const file = path.resolve(__dirname, '../../../.github/workflows', name + '.yml');
@@ -37,17 +39,95 @@ afterEach(() => {
   if (temp) rmSync(temp, { recursive: true, force: true });
 });
 
+describe.skipIf(process.platform === 'win32')('SonarQube gate', () => {
+  const scan = namedStep(scanner, 'SonarQube Scan');
+
+  it.each([
+    ['pull_request', '09:14:27.012 WARN  Advisory with ERROR in the message', 0, 0],
+    ['pull_request', '09:14:27.012 ERROR Failed to deserialize Protobuf message', 0, 1],
+    ['pull_request', '09:14:27.012 INFO  Quality gate failed', 2, 2],
+    ['workflow_run', '09:14:27.012 INFO  Complete', 0, 0],
+  ] as const)('checks scanner output and exit status for %s (%s)', (event, log, exit, expected) => {
+    // Run the workflow shell with a stand-in CLI and capture its actual arguments.
+    const cli = 'sonar-scanner() { printf "%s\\n" "$@" "$LOG"; return "$SCAN_EXIT"; }';
+    expect(scan.shell).toBe('bash'); // Actions enables pipefail for an explicit bash shell.
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c', cli + '\n' + scan.run], {
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: event,
+        MAIN_REVISION: 'abc123',
+        RUNNER_TEMP: '/runner temp',
+        LOG: log,
+        SCAN_EXIT: String(exit),
+      },
+      encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(expected);
+    expect(result.stdout).toContain(log);
+    expect(result.stdout).toContain('-Dsonar.qualitygate.wait=true');
+    expect(result.stdout.split('\n')).toContain(
+      '-Dsonar.java.binaries=/runner temp/sonar-java-classes',
+    );
+    if (event === 'workflow_run') {
+      expect(result.stdout).toContain('-Dsonar.branch.name=main');
+      expect(result.stdout).toContain('-Dsonar.scm.revision=abc123');
+    } else {
+      expect(result.stdout).not.toContain('-Dsonar.branch.name=');
+    }
+  });
+
+  it.each([
+    [true, 'success', 0],
+    [true, 'failure', 1],
+    [true, 'cancelled', 1],
+    [true, 'skipped', 1],
+    [false, 'skipped', 0],
+  ] as const)(
+    'requires Sonar success on eligible PRs (required %s, result %s)',
+    (required, sonar, expected) => {
+      const ci = readWorkflow('ci');
+      const gate = ci.jobs['ci-status'];
+      expect(gate.needs).toContain('sonar');
+      const check = namedStep(gate.steps ?? [], 'Check all jobs passed');
+      expect(check.env?.SONAR).toBe('${{ needs.sonar.result }}');
+      const eligible = ci.jobs.sonar.if?.replace('!cancelled() && ', '').trim();
+      expect(check.env?.SONAR_REQUIRED).toBe('${{ ' + eligible + ' }}');
+      if (!check.run) throw new Error('Missing CI gate script');
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', check.run], {
+        env: {
+          ...process.env,
+          QUALITY: 'success',
+          TESTS: 'success',
+          E2E: 'skipped',
+          SONAR: sonar,
+          SONAR_REQUIRED: String(required),
+        },
+        encoding: 'utf8',
+      });
+      expect(result.status, result.stderr).toBe(expected);
+    },
+  );
+});
+
 describe('SonarQube coverage handoff', () => {
   it('keeps threshold failures blocking while allowing both reports to reach the scanner', () => {
     const step = (name: string) => namedStep(producer, name);
     const merge = step('Merge coverage + enforce thresholds');
+    const java = step('Add Java conformance to the CLI SonarQube report');
     const web = step('Run gitnexus-web unit tests');
     const upload = step('Upload SonarQube coverage');
     expect(merge['continue-on-error']).toBeUndefined();
     expect(web['continue-on-error']).toBeUndefined();
-    for (const name of ['Install gitnexus-web dependencies', 'Run gitnexus-web unit tests']) {
+    for (const name of [
+      'Download Java conformance LCOV',
+      'Add Java conformance to the CLI SonarQube report',
+      'Install gitnexus-web dependencies',
+      'Run gitnexus-web unit tests',
+    ]) {
       expect(step(name).if).toContain('!cancelled()');
     }
+    expect(producer.indexOf(java)).toBeGreaterThan(producer.indexOf(merge));
+    expect(upload.if).toContain("steps.java-lcov.outcome == 'success'");
     expect(upload.if).toContain('!cancelled()');
     expect(upload['continue-on-error']).toBe(true);
     expect(upload.with?.path.trim().split('\n')).toEqual(
@@ -58,6 +138,27 @@ describe('SonarQube coverage handoff', () => {
     );
     expect(readWorkflow('ci').jobs.sonar.if).toContain('!cancelled()');
     expect(readWorkflow('ci').jobs.sonar.if).not.toMatch(/success\(|needs\.tests/);
+  });
+
+  it.skipIf(process.platform === 'win32')('appends Java hits and requires the CLI report', () => {
+    temp = mkdtempSync(path.join(tmpdir(), 'sonar-java-coverage-'));
+    const coverage = path.join(temp, 'coverage');
+    const java = path.join(temp, 'java-conformance-coverage');
+    mkdirSync(coverage);
+    mkdirSync(java);
+    const source = 'SF:src/index.ts\nDA:1,0\nend_of_record\n';
+    const javaSource = 'SF:src/ingestion.ts\nDA:2,1\nend_of_record\n';
+    writeFileSync(path.join(java, 'lcov.info'), javaSource);
+    const script = namedStep(producer, 'Add Java conformance to the CLI SonarQube report').run!;
+    const combine = () =>
+      spawnSync('bash', ['-e', '-c', script], {
+        cwd: temp,
+        env: { ...process.env, RUNNER_TEMP: temp },
+      });
+    expect(combine().status).toBe(1);
+    writeFileSync(path.join(coverage, 'lcov.info'), source);
+    expect(combine().status).toBe(0);
+    expect(readFileSync(path.join(coverage, 'lcov.info'), 'utf8')).toBe(source + javaSource);
   });
 
   it('scans stacked PRs and pins main coverage to the trusted Publish run', () => {
