@@ -13,7 +13,7 @@ via_registry <- function() {
 }
 via_qualified_value <- function(xs) lapply(xs, shapes::helper)
 
-# An infix operator is not linked to its definition.
+# An infix operator is a call of its backticked definition.
 via_infix <- function(a, b) a %+% b
 
 # S4 slot access is not a call.

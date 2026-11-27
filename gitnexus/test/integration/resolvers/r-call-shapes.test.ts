@@ -43,11 +43,21 @@ describe('R: positive controls of the call-shape fixture', () => {
     expect(edge[0].rel.reason).toBe('import-resolved');
   });
 
+  it('links an infix operator to its backticked definition, as a free call', () => {
+    expect(callsFrom('via_infix').map((e) => `${e.targetFilePath}:${e.target}`)).toEqual([
+      'R/helpers.R:`%+%`',
+    ]);
+    // Across files, by the unique-name guess, as for a plain call.
+    expect(callsFrom('via_infix').map((e) => `${e.rel.reason}:${e.rel.confidence}`)).toEqual([
+      'global-name-fallback:0.5',
+    ]);
+  });
+
   it('links a call to a function that dispatches (UseMethod), but only to that function', () => {
     expect(callsFrom('use_area').map((e) => e.target)).toEqual(['area']);
   });
 
-  it('has exactly these CALLS edges, so every shape below stayed unlinked', () => {
+  it('has exactly these CALLS edges, so every other shape stayed unlinked', () => {
     const calls = getRelationships(result, 'CALLS')
       .map((e) => `${e.source} -> ${e.target}`)
       .sort();
@@ -60,6 +70,7 @@ describe('R: positive controls of the call-shape fixture', () => {
       'shout -> greet',
       'up -> climb_up',
       'use_area -> area',
+      'via_infix -> `%+%`',
     ]);
   });
 });
@@ -75,11 +86,6 @@ describe('R: a function used other than as a callee creates no CALLS edge', () =
     ['via_qualified_value', 'lapply(xs, shapes::helper)'],
   ])('%s: %s', (caller) => {
     expect(callsFrom(caller)).toEqual([]);
-  });
-
-  it('does not link an infix operator to its definition', () => {
-    expect(callsFrom('via_infix')).toEqual([]);
-    expect(getRelationships(result, 'CALLS').filter((e) => e.target === '`%+%`')).toEqual([]);
   });
 
   it('does not read S4 slot access p@name as a call of the function name()', () => {

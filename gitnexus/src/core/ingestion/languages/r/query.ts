@@ -11,9 +11,11 @@
  *
  * R specifics encoded here:
  *
- *   - Every `binary_operator` pattern is an assignment: `operator: ["<-" "<<-" "="]`
- *     (see `assignment.ts`). The grammar uses one node for every infix operator, so
- *     without it `x + R6Class(...)` or `x == function() 1` would declare something.
+ *   - Every `binary_operator` pattern is an assignment (`operator: ["<-" "<<-" "="]`, see
+ *     `assignment.ts`) except one: the infix call `a %op% b` (`operator: "special"`), which
+ *     only mints a call site and declares nothing. The grammar uses one node for every infix
+ *     operator, so without the constraint `x + R6Class(...)` or `x == function() 1` would
+ *     declare something.
  *
  *   - A Class scope spans the ENTIRE `R6Class(...)`/`setClass(...)` call
  *     (the whole `binary_operator` for the `name <- R6Class(...)` shape),
@@ -367,6 +369,23 @@ export const R_SCOPE_QUERY = `
 ;; an assignment target (foo(x) <- v), see isRReplacementCall in assignment.ts.
 (call
   function: (identifier) @reference.name) @reference.call.free
+
+;; Infix calls: a %op% b calls the function named %op%. The grammar gives every %...% operator (the base
+;; %in%, %o%, %*%, %%, %/% and the pipe %>% included) the same token, so a site is minted for each;
+;; it binds only when the repository defines a function of that name, as for any other free call.
+;; The definition keeps its backticks as written; the name is compared through rBareName.
+(binary_operator
+  operator: "special" @reference.name) @reference.call.free
+
+;; Bare magrittr stage: in x %>% f the stage f is an identifier, not a call, so the free-call
+;; pattern above never sees it. The identifier is both the name and the anchor, so the site is
+;; one call of f (a stage written f() is a call and is matched above, not here). Pipes only:
+;; a %in% b does not call b. %$% reads a bare name from its left-hand side's data, so a stage
+;; there may be a column, not a function.
+(binary_operator
+  operator: "special" @_pipe
+  (#match? @_pipe "^%(>|<>|T>|[$])%$")
+  rhs: (identifier) @reference.name @reference.call.free)
 
 ;; Namespaced calls: pkg::func() and pkg:::func(). The whole namespace_operator
 ;; is captured as the qualified name so the qualifier survives the parse cache.

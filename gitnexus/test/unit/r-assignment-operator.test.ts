@@ -118,11 +118,25 @@ describe('R queries: only an assignment declares a definition', () => {
       // alternative in a value list, not an anchor.
       const patterns = text.split(/^\(binary_operator\n/m).slice(1);
       expect(patterns.length, label).toBeGreaterThan(0);
-      for (const body of patterns) {
+      // The two patterns that are not an assignment are the infix call `a %op% b` and the bare
+      // magrittr stage `x %>% f` in the scope query. Each is pinned exactly, so a declaration or
+      // scope capture added to one fails here.
+      const INFIX_PATTERN = 'operator: "special" @reference.name) @reference.call.free';
+      const PIPE_STAGE_PATTERN = [
+        'operator: "special" @_pipe',
+        '  (#match? @_pipe "^%(>|<>|T>|[$])%$")',
+        '  rhs: (identifier) @reference.name @reference.call.free)',
+      ].join('\n');
+      const head = (body: string) => body.split('\n\n')[0].trim();
+      const isInfixCall = (body: string) => head(body) === INFIX_PATTERN;
+      const isPipeStage = (body: string) => head(body) === PIPE_STAGE_PATTERN;
+      for (const body of patterns.filter((b) => !isInfixCall(b) && !isPipeStage(b))) {
         expect(body.split('\n\n')[0], `${label}: ${body.slice(0, 60)}`).toContain(
           'operator: ["<-" "<<-" "="]',
         );
       }
+      expect(patterns.filter(isInfixCall).length, label).toBe(label === 'R_SCOPE_QUERY' ? 1 : 0);
+      expect(patterns.filter(isPipeStage).length, label).toBe(label === 'R_SCOPE_QUERY' ? 1 : 0);
     }
   });
 });

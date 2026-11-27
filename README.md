@@ -122,7 +122,8 @@ R (experimental) also has a registered provider (`.r` / `.R`, parsed with
 methods and fields, `library()` / `require()` / `source()` imports to local
 packages and files, `obj$method()` and `pkg::fn()` calls, R6 `inherit=` / S4
 `contains=` heritage and NAMESPACE-driven export status. Calls through function
-values, `do.call()`, infix operators and S3 dispatch are not linked; `.Rmd`,
+values, `do.call()` and S3 dispatch are not linked, and an infix operator `a %op% b` links only to a
+backtick-defined `%op%` of the repository (not to base operators or `%>%`); `.Rmd`,
 `box::use()` and external (CRAN) packages are not supported. With `--pdg` it
 builds a control-flow graph (control dependence only, no reaching definitions),
 and `rename` handles plain functions while refusing classes, members, S3 methods,
